@@ -308,6 +308,24 @@ class PlayerCard:
         if not self.stats.get("first_played"):
             self.stats["first_played"] = self.stats["last_played"]
 
+    def add_meme(self, text: str, origin: str = "",
+                 kind: str = "running_joke") -> bool:
+        """记一条梗。引擎自己数出来的，不走复盘那条路。
+
+        已经在卡上的就把 uses 加一。render_system_block 按 uses 排序，
+        所以被反复念叨的梗会自己浮到最上面。返回 True 表示新收了一条。
+        """
+        text = (text or "").strip()
+        if not text or len(text) > 60:
+            return False
+        hit = next((m for m in self.memes if _norm(m.text) == _norm(text)), None)
+        if hit is not None:
+            hit.uses += 1
+            return False
+        self.memes.append(Meme(text=text, kind=kind, origin=origin))
+        self.memes = self.memes[-40:]
+        return True
+
     def absorb(self, retro: dict[str, Any], session_id: str,
                character: dict[str, Any] | None = None,
                module_title: str = "", fate: str = "") -> list[str]:

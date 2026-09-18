@@ -1402,6 +1402,63 @@ def main() -> int:
     check("table_energy" in _ui_src, "设置面板里有桌边话量的下拉")
     check("'5', '5 话最多'" in _ui_src, "下拉有五个档位")
 
+    # ══════════════════════════════════════════════ 17. 梗由引擎自己数
+    print("\n【17】梗：引擎自己数跨人的重复")
+
+    from engine import memes as memes_mod
+    from engine import player_memory as pmem_mod
+
+    # 梗的定义就是跨人的重复。模型每轮只看得到自己那份历史，
+    # 它不知道别人刚才说过什么，所以这件事只能引擎来做。
+    w = memes_mod.MemeWatcher()
+    w.observe("咸鱼", "那我把门拆了", 1)
+    w.observe("半糖", "行啊", 1)
+    check(not w.harvest(), "一个人说过，不算梗")
+    w.observe("半糖", "那我把门拆了", 2)
+    check(w.harvest() == ["那我把门拆了"], "两个不同的人都说了，才算梗")
+    check(not w.harvest(), "同一句只收一次，不会反复冒出来")
+
+    w2 = memes_mod.MemeWatcher()
+    w2.observe("A", "我先上去看看那扇门后面有什么", 1)
+    w2.observe("B", "我先上去看看那扇门后面有什么", 1)
+    check(not w2.harvest(), "太长的句子不收，那是叙述不是口头禅")
+
+    w3 = memes_mod.MemeWatcher()
+    for junk in ("真的假的", "绷", "哈哈哈哈哈", "我也不知道", "啊啊啊啊", "绷绷绷"):
+        w3.observe("A", junk, 1)
+        w3.observe("B", junk, 1)
+    check(not w3.harvest(),
+          "谁都说的口水词不收：笑声、叠字、单字的「绷」都不算梗")
+
+    w4 = memes_mod.MemeWatcher()
+    w4.observe("A", "那我把门拆了", 1)
+    w4.observe("B", "那我把门拆了", 9)
+    check(not w4.harvest(), "隔太久的不收，那只是碰巧说了一样的话")
+
+    w5 = memes_mod.MemeWatcher()
+    w5.observe("A", "那我把门拆了", 1)
+    w5.observe("A", "那我把门拆了", 2)
+    check(not w5.harvest(), "同一个人反复念叨不算梗")
+
+    # 收下来的梗要写进玩家卡，跨周目带得走
+    card = pmem_mod.PlayerCard("probe_meme", "测试")
+    check(card.add_meme("那我把门拆了", origin="s1") is True, "新梗写进玩家卡")
+    check(card.add_meme("那我把门拆了") is False, "同一句再收不算新的")
+    check(card.memes[0].uses == 1, "重复出现的梗会累加 uses", str(card.memes[0].uses))
+    check(card.add_meme("x" * 80) is False, "过长的东西不收")
+    check(card.add_meme("") is False, "空的不收")
+    check("那我把门拆了" in card.render_system_block(max_memes=3),
+          "梗会出现在这个人的 system 提示里")
+
+    # ---- 「绷」：一个字的回复也是合格回复 ----
+    check("绷" in prompts_mod.TABLE_REGISTER, "桌边语域收进了「绷」")
+    check("一个字也算一次发言" in prompts_mod.TABLE_REGISTER,
+          "明说了一个字的回复也成立")
+    talk_txt = prompts_mod.build_table_talk_system(seat_probe)
+    check("绷" in talk_txt, "桌边闲聊提示词里也拿得到这条")
+    check(not linter_mod.lint("绷", channels=linter_mod.PL_CHANNELS).dirty,
+          "「绷」不会被哨兵拦下来")
+
     # ══════════════════════════════════════════ 汇总
     print("\n" + "=" * 70)
     if failures:

@@ -1096,7 +1096,7 @@ class KPAgent(BaseAgent):
     def study_module(self, module_brief: str, roster_block: str,
                      scene_ids: list[str], module_title: str,
                      player_count: int, extra_note: str = "") -> dict[str, Any]:
-        """开局前的功课：读模组 → 写理解 / 大纲 / 扩展 / 彩蛋。"""
+        """开局前的功课：读模组，写开场日 / 大纲 / 理解 / 扩展 / 彩蛋。"""
         user = prompts.build_module_study_user(module_title, player_count)
         if extra_note.strip():
             user += "\n\n" + extra_note.strip()
@@ -1114,7 +1114,7 @@ class KPAgent(BaseAgent):
             return {"ok": False, "error": e.message}
 
         out = {k: _tagged(res.text, k)
-               for k in ("spine", "understanding", "expansion", "eggs")}
+               for k in ("clock", "spine", "understanding", "expansion", "eggs")}
         out["ok"] = bool(out["understanding"] or out["spine"])
         out["spine_ids"] = parse_spine(out["spine"])
         out["raw"] = res.text

@@ -27,6 +27,7 @@ import yaml
 from . import chargen, memory as memory_mod, module_lib, rules as rules_mod
 from . import clock as clock_mod
 from . import config as cfgmod
+from . import memes as memes_mod
 from . import player_memory, spoiler
 from . import study as study_mod
 from .agents import BaseAgent, ChannelOutput, Directive, KPAgent, PLAgent
@@ -85,6 +86,8 @@ class GameLoop:
         self._public_dice: list[str] = []
         # 桌上的钟：模型自己算日子一定会把什么都叫"昨天"，所以引擎替它算
         self._clock_dirty = False
+        # 梗探测器：引擎自己数跨人的重复，模型看不见这件事
+        self.memes = memes_mod.MemeWatcher()
         # 桌边插话轮里"这次轮到谁接话"的游标（免得每次都点同一个人）
         self._tt_cursor = 0
         if session.clock is None:
@@ -431,12 +434,32 @@ class GameLoop:
         """
         assert self.kp is not None
         mid = self.module.id if self.module else ""
+
+        def apply_study_clock() -> None:
+            """功课做完之后，按守秘人挑的日子重定一次钟。
+
+            钟在 __init__ 里已经猜过一次了，那时功课还没做，这一行还不存在。
+            只在开局前重定，跑到一半再改日期会把已经说过的时间弄乱。
+            """
+            if self.session.clock is None or self.session.round:
+                return
+            picked = str((self.session.module_study or {}).get("clock") or "").strip()
+            if not picked:
+                return
+            before = self.session.clock.short()
+            self.session.clock = clock_mod.resolve_start(
+                self.module, self.options, picked=picked)
+            after = self.session.clock.short()
+            if after != before:
+                self._e("system", f"开场日按守秘人的功课定在 {after}")
+
         if mid and not force:
             saved = study_mod.load_study(mid)
             if saved:
                 self.session.module_study = {
                     k: saved.get(k, "") for k in
-                    ("spine", "spine_ids", "understanding", "expansion", "eggs")}
+                    ("clock", "spine", "spine_ids", "understanding",
+                     "expansion", "eggs")}
                 self._e("system", f"── 这个模组之前已经研读过"
                                   f"（{saved.get('updated_at', '')}，"
                                   f"{saved.get('keeper', '')}），直接复用 ──")
@@ -446,6 +469,7 @@ class GameLoop:
                               "expansion": self.session.module_study.get("expansion", ""),
                               "eggs": self.session.module_study.get("eggs", ""),
                               "cached": True})
+                apply_study_clock()
                 return self.session.module_study
 
         title = self.module.title if self.module else ""
@@ -485,6 +509,7 @@ class GameLoop:
                 self._e("system", "大纲核对通过，与模组一致。")
 
         self.session.module_study = {
+            "clock": res.get("clock", ""),
             "spine": res.get("spine", ""),
             "spine_ids": res.get("spine_ids", []),
             "understanding": res.get("understanding", ""),
@@ -508,6 +533,7 @@ class GameLoop:
                 self._e("system", f"功课已存档，以后用这个模组开团会直接复用。")
             except Exception as e:  # noqa: BLE001
                 self._e("system", f"功课存档失败（不影响这一局）：{e}")
+        apply_study_clock()
         return self.session.module_study
 
     def _module_fulltext(self) -> str:
@@ -1239,6 +1265,33 @@ class GameLoop:
                 if entry is not None:
                     entry["ooc"] = (entry.get("ooc", "") + "\n" + reply).strip()
                     entry["tt"] = True
+
+        self._watch_memes()
+
+    # ══════════════════════════════════════════════ 梗
+
+    def _watch_memes(self) -> None:
+        """把这一轮全桌说过的话喂给梗探测器，捡跨人的重复。
+
+        为什么要引擎来做：模型每轮只看得到自己那份历史，
+        它不知道「这句话刚才别人也说过」。而梗的定义就是跨人的重复。
+        """
+        for o in self._round_publics:
+            who = (o.get("player_name") or o.get("display_name")
+                   or o.get("seat_id") or "")
+            self.memes.observe(who, o.get("ooc") or "", self.session.round)
+            self.memes.observe(who, o.get("act") or "", self.session.round)
+        kp_out = getattr(self.kp, "last_output", None)
+        if kp_out is not None:
+            self.memes.observe(self._player_of(self.kp),
+                               getattr(kp_out, "ooc", "") or "", self.session.round)
+
+        for text in self.memes.harvest():
+            self._e("system", f"「{text}」被好几个人念叨，成梗了")
+            for pl in self.pls:
+                card = getattr(pl, "card", None)
+                if card is not None:
+                    card.add_meme(text, origin=self.session.session_id)
 
     # ══════════════════════════════════════════════ KP 指令执行
 

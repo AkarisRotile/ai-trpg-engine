@@ -55,6 +55,9 @@ def save_study(module_id: str, study: dict[str, Any], *,
         "keeper": keeper,
         "model": model,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
+        # 守秘人研读时挑的开场日。引擎拿它定日历，
+        # 优先级高于「从简介抠日期」和哈希兜底。
+        "clock": study.get("clock", ""),
         "spine": study.get("spine", ""),
         "spine_ids": study.get("spine_ids", []),
         "understanding": study.get("understanding", ""),
