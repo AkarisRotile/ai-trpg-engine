@@ -212,6 +212,27 @@ def probe(window) -> None:
         check(bool(body.strip()), "设置里有「最近出错」面板且能读出内容",
               body.replace("\n", " ")[:70])
 
+        # ── 拉取模型列表：拉到了必须真的铺出来 ──
+        # 这条走过两个 bug：datalist 点不出来（现在铺成按钮）；
+        # 以及 saveConfig 会重渲染面板，之前抓到的输入框成了孤儿节点，
+        # 于是"拉到了 2 个模型"却什么都没显示。
+        n_pick = js("(function(){try{return applyModelsToSeat('kp',"
+                    "['deepseek-chat','deepseek-reasoner']);}"
+                    "catch(e){return 'ERR:'+e.message;}})()")
+        try:
+            n_pick = int(n_pick)
+        except (TypeError, ValueError):
+            n_pick = -1
+        check(n_pick == 2, "拉到的模型名会就地铺成可点的按钮",
+              f"实得 {n_pick} 个 .model-pick")
+        picked = js("(function(){var b=document.querySelector("
+                    "'#seatEditors .model-pick');if(!b)return 'NO'."
+                    "replace('NO','none');b.click();"
+                    "return document.querySelector("
+                    "'#seatEditors .seat-editor[data-seat-id=\"kp\"] "
+                    "[data-k=\"model\"]').value;})()")
+        check(picked == "deepseek-chat", "点一下就能填进模型名", str(picked))
+
         bg = js("getComputedStyle(document.body).backgroundColor")
         check(bg not in (None, '', 'rgba(0, 0, 0, 0)'), "样式表已加载", str(bg))
 

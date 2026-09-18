@@ -525,6 +525,21 @@ body.study-mode #btnStart,
 body.study-mode #btnAuto,
 body.study-mode #btnStep { opacity: .45; }
 
+/* ── 拉到的模型名：铺成可点的按钮 ── */
+.model-picks {
+  display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px;
+  max-height: 132px; overflow-y: auto;
+}
+.model-pick {
+  font-family: var(--mono); font-size: 11px; line-height: 1;
+  padding: 5px 9px; border-radius: 999px; cursor: pointer;
+  background: var(--bg-3); border: 1px solid var(--line); color: var(--fg-dim);
+}
+.model-pick:hover { border-color: var(--accent-dim); color: var(--fg); }
+.model-pick.on {
+  background: #1d2f4d; border-color: var(--accent); color: #cfe1ff;
+}
+
 /* ── 出错记录 ── */
 .errlog {
   margin-top: 16px; background: var(--bg-3); border: 1px solid var(--line);

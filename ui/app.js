@@ -725,8 +725,30 @@ const OPTION_DEFS = [
 
 function providerOf(id) { return S.providers[id] || {}; }
 
+/** 按座位 id 找回**当前在文档里**的模型输入框。
+ *  面板重渲染之后，之前抓到的节点就是孤儿了，得重新查。 */
+function findSeatModelField(seatId) {
+  const box = document.querySelector(
+    `#seatEditors .seat-editor[data-seat-id="${seatId}"]`);
+  const input = box && box.querySelector('[data-k="model"]');
+  if (!input) return {};
+  return { box, input, field: input.parentElement };
+}
+
+/** 测试用：把真正的 fetch_models 结果铺到某个座位上（绕开网络）。
+ *  刻意是同步的：evaluate_js 拿不到 Promise 的值，异步函数会测不出来。 */
+function applyModelsToSeat(seatId, models) {
+  const f = findSeatModelField(seatId);
+  if (!f.input) return 0;
+  installModelList(f.field, f.input, models);
+  return f.box.querySelectorAll('.model-pick').length;
+}
+
 function buildSeatEditor(seat, idx) {
   const box = el('div', 'seat-editor ' + (seat.kind === 'KP' ? 'kp' : 'pl'));
+  // 记住这个盒子属于哪个座位：拉完模型之后要按 id 重新找回**当前**的输入框
+  // （saveConfig 会整块重渲染，之前抓到手的节点就成孤儿了）
+  box.dataset.seatId = seat.seat_id;
   const head = el('div', 'head');
   head.appendChild(el('b', null,
     (seat.kind === 'KP' ? '🔒 守秘人' : `🎭 玩家 ${idx}`) + `　${seat.seat_id}`));
@@ -827,9 +849,14 @@ function buildSeatEditor(seat, idx) {
       await saveConfig(true);        // 先把刚填的地址和 Key 存下去，服务端才知道用哪个
       const r = await call('fetch_models', seat.seat_id);
       if (!r.ok) { toast(r.message, 'err'); return; }
-      installModelList(modelField, modelInput, r.models);
-      toast(`拉到 ${r.count} 个模型，点输入框就能选`, 'ok');
+      // ★ 上面那句 saveConfig 会调 renderSettings() 把整个面板重渲染一遍，
+      //   手里这个 modelField / modelInput 已经变成不在文档里的孤儿节点了——
+      //   往它上面挂东西当然什么都看不见。所以按座位 id 重新取一次活的。
+      const live = findSeatModelField(seat.seat_id);
+      installModelList(live.field || modelField, live.input || modelInput, r.models);
+      toast(`拉到 ${r.count} 个模型，点下面的名字就能选`, 'ok');
     } catch (e) {
+      reportClientError('拉取模型列表失败', e && e.stack);
       toast('拉取失败：' + e.message, 'err');
     } finally {
       fetchBtn.disabled = false;
@@ -874,8 +901,32 @@ function cachedModels(baseUrl) {
   return cache[key] || [];
 }
 
-/** 把拉到的模型列表挂到输入框上（datalist：既能选也能自己填）。 */
+/** 把拉到的模型名就地铺成可点的按钮。
+ *
+ * 原来只用 <datalist>：Chromium 里它不会点一下就弹（要聚焦再按方向键、
+ * 或者手打几个字），WebView2 里更不听话——用户点了「拉取模型列表」，
+ * 除了一个 toast 什么都没发生。所以直接铺一排按钮出来，点了就填进去。
+ * datalist 仍然留着，想手打的时候还能自动补全。
+ */
 function installModelList(field, input, models) {
+  if (!field || !input) return;
+  field.querySelectorAll('.model-picks').forEach((n) => n.remove());
+
+  const box = el('div', 'model-picks');
+  box.dataset.models = String((models || []).length);
+  (models || []).forEach((m) => {
+    const b = el('button', 'model-pick' + (input.value === m ? ' on' : ''), m);
+    b.type = 'button';
+    b.onclick = (e) => {
+      e.preventDefault();
+      input.value = m;
+      box.querySelectorAll('.model-pick').forEach((x) => x.classList.remove('on'));
+      b.classList.add('on');
+    };
+    box.appendChild(b);
+  });
+  field.appendChild(box);
+
   let list = field.querySelector('datalist');
   if (!list) {
     list = el('datalist');
@@ -889,8 +940,7 @@ function installModelList(field, input, models) {
     o.value = m;
     list.appendChild(o);
   });
-  if (!input.value && models && models.length) input.value = models[0];
-  input.placeholder = `共 ${models.length} 个可点选`;
+  input.placeholder = `共 ${(models || []).length} 个，点下面的名字就能选`;
 }
 
 function updateModelList(box, providerId) {
@@ -1888,7 +1938,7 @@ function bind() {
       const r = await call('fetch_models', '', base, $('visKey').value);
       if (!r.ok) { toast(r.message, 'err'); return; }
       installModelList($('visModel').parentElement, $('visModel'), r.models);
-      toast(`拉到 ${r.count} 个模型`, 'ok');
+      toast(`拉到 ${r.count} 个模型，点下面的名字就能选`, 'ok');
     } catch (e) {
       toast('拉取失败：' + e.message, 'err');
     } finally {
