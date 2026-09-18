@@ -55,13 +55,24 @@ KEEP_EMPTY = [
     "data/rules",
     "data/runtime/sessions",
 ]
-# 这些是"证据 / 测试产物"，扫到就该报警。
-# 注意：只查 _internal\ 以外的部分——那里面是 Python 依赖本身，
+# 这些是"证据 / 测试产物"，扫到就该报警。# 注意：只查 _internal\ 以外的部分——那里面是 Python 依赖本身，
 # 「Microsoft.Web.WebView2.Core.dll」这种名字会被误判成浏览器缓存。
 SUSPECT = re.compile(
     r"(^|/)(config\.json|roster\.yaml|\.webview[^/]*|\.ui-version|\.selftest"
     r"|transcript\.jsonl|session\.json|player\.yaml|_smoke[^/]*)$"
     r"|_result\.json$|\.bak$|\.log$", re.I)
+
+# 真正的密钥形状。名字里有 FAKE 的是自检用的假 Key，放行。
+_SECRET_PATTERNS = [
+    ("看起来像 API Key", re.compile(rb"sk-[A-Za-z0-9]{16,}")),
+    ("看起来像 GitHub 令牌", re.compile(rb"gh[pousr]_[A-Za-z0-9]{20,}")),
+    ("Authorization 头", re.compile(rb"(?i)bearer\s+[A-Za-z0-9_\-\.]{20,}")),
+]
+_FAKE = re.compile(
+    rb"(?i)(FAKE|rotate-test-key|sk-test\b|sk-x\b"
+    # 下面两个是早期提交里自检用的样例串（验证日志打码），不是任何人的真 Key。
+    # 历史里删不掉，所以在这里明确放行——它们一眼就是编的。
+    rb"|abcdef1234567890abcdef|zzzz9999888877776666)")
 
 
 def _is_own(path: Path, root: Path) -> bool:
@@ -90,6 +101,35 @@ def clean(install_dir: Path) -> None:
         p.unlink(missing_ok=True)
     for rel in KEEP_EMPTY:
         (install_dir / rel).mkdir(parents=True, exist_ok=True)
+
+
+def scan_for_secrets(root: Path, limit: int = 40) -> list[tuple[str, str]]:
+    """扫真正的密钥形状。返回 [(相对路径, 类型)]，**不返回密钥本身**。
+
+    只查 `_internal\\` 之外的用户数据区——那里是 Python 依赖，
+    里面可能有形如 sk-... 的测试串，不是用户的 Key。
+    """
+    found: list[tuple[str, str]] = []
+    for f in sorted(root.rglob("*")):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(root).as_posix()
+        if rel.startswith("_internal/"):
+            continue
+        if f.stat().st_size > 20 * 1024 * 1024:
+            continue
+        try:
+            blob = f.read_bytes()
+        except Exception:
+            continue
+        for label, rx in _SECRET_PATTERNS:
+            m = rx.search(blob)
+            if m and not _FAKE.search(m.group(0)):
+                found.append((rel, label))
+                break
+        if len(found) >= limit:
+            break
+    return found
 
 
 def audit(install_dir: Path) -> list[str]:
@@ -142,6 +182,18 @@ def main() -> int:
         for p in problems[:20]:
             print(f"   · {p}")
         return 1
+
+    # ★ 硬闸门：扫一遍真正的密钥形状。用户的 Key 存在 data\config.json 里
+    #   （那是本地配置，本来就在），但**绝不能跟着包出去**。
+    #   这一步是照着"有人说'我的 Key 别传出去'"加的：不靠记性，靠每次自动扫。
+    leaked = scan_for_secrets(src)
+    if leaked:
+        print("\n⚠ 打包目录里扫到像密钥的东西，已停下：")
+        for where, label in leaked[:10]:
+            print(f"   · {where}  [{label}]")
+        print("  把来源清掉再重跑（一般是 data\\config.json 或某份日志）。")
+        return 1
+    print("密钥扫描：干净（没有 sk- / ghp_ / Bearer 之类的东西）")
     print("清场检查：干净")
 
     # 附一份源码里的读我.txt（如果成品目录里没有就让 build_exe.py 生成的那份留着）

@@ -861,14 +861,18 @@ def main() -> int:
     from engine import errlog
 
     errlog.clear()
-    # Key 绝不能落盘——错误信息里很可能带着 Authorization
-    dirty = ("连不上 https://api.deepseek.com/v1/chat/completions"
-             " with key sk-abcdef1234567890abcdef 和 "
-             "Authorization: Bearer sk-zzzz9999888877776666")
+    # Key 绝不能落盘——错误信息里很可能带着 Authorization。
+    # 这两个是**故意写死的假 Key**，名字里带 FAKE 是为了让
+    # tools/scan_secrets.py 能一眼认出并放行；真 Key 扫到就会报。
+    fake_a = "sk-FAKEonly-for-tests-000000000001"
+    fake_b = "sk-FAKEonly-for-tests-000000000002"
+    dirty = (f"连不上 https://api.deepseek.com/v1/chat/completions"
+             f" with key {fake_a} 和 "
+             f"Authorization: Bearer {fake_b}")
     errlog.log("测试", dirty)
     raw = errlog.tail(20)
-    check("sk-abcdef1234567890abcdef" not in raw, "写盘前把 API Key 打码了")
-    check("sk-zzzz9999888877776666" not in raw, "Authorization 里的 Key 也打码了")
+    check(fake_a not in raw, "写盘前把 API Key 打码了")
+    check(fake_b not in raw, "Authorization 里的 Key 也打码了")
     check("****" in raw, "打码后留了前缀，看得出是哪个 Key", raw.splitlines()[-1][:90])
     check("连不上" in raw, "正文本身没被吃掉")
 
@@ -888,8 +892,182 @@ def main() -> int:
     errlog.clear()
     check(not errlog.tail(5).strip(), "能清空")
 
-    # ══════════════════════════════════════════ 14. 乱格式模组 + 单人研读室
-    print("\n【14】乱格式模组解析 + 只有导演和 KP 的研读室")
+    # ══════════════════════════════════════════ 14. 车卡规范
+    print("\n【14】车卡规范：技能点超支与 90 上限（docs/车卡规范.md）")
+    from engine import cardcalc as _cc
+    ca = {"STR": 50, "CON": 60, "DEX": 70, "APP": 50, "POW": 55,
+          "SIZ": 65, "INT": 65, "EDU": 80, "LUCK": 45}
+
+    # ★ 权威源是**用户那张卡**，不是引擎里另写的一张表
+    occ_tbl = _cc.occupation_table()
+    check(len(occ_tbl) > 100, "从角色卡模板里读到了职业表",
+          f"{len(occ_tbl)} 个职业")
+    jz = _cc.find_occupation("记者")
+    check(jz is not None and jz.credit == (9, 30) and "教育" in jz.formula_text,
+          "记者的信用区间与点数公式取自卡本身",
+          f"{jz.credit} / {jz.formula_text} = {jz.points(ca)}" if jz else "（没读到）")
+    check(jz is not None and len(jz.skills) >= 8,
+          "本职技能也是从卡上的『本职技能』矩阵读的",
+          "、".join(jz.skills[:10]) if jz else "")
+    check(_cc.eval_formula('=__import__("os").system("calc")', ca) is None
+          and _cc.eval_formula("=1+1;2", ca) is None,
+          "卡上的公式只按白名单求值，可疑公式一律拒绝")
+
+    bs = chargen.budget_split(ca, "记者")
+    check(bs["source"] == "card", "预算优先用卡里的算法", bs["source"])
+    check(bs["occ"] == 80 * 2 + max(70, 50) * 2 and bs["interest"] == 65 * 2,
+          "预算拆成两笔账，职业点按卡上公式算",
+          f"职业 {bs['occ']}（{bs['formula']}） + 兴趣 {bs['interest']} = {bs['total']}")
+    check(bs["credit"] == [9, 30], "记者这个职业的信用评级区间查得到",
+          str(bs["credit"]))
+    pol = chargen.budget_split(ca, "刑警")     # 卡里没有「刑警」，走内置表兜底
+    check(pol["occ"] == 80 * 2 + 70 * 2 and pol["source"] == "builtin",
+          "卡里没有的职业退回引擎内置表（刑警 = EDU×2+DEX×2）",
+          f"{pol['occ']}（{pol['formula']}，来源 {pol['source']}）")
+    unk = chargen.budget_split(ca, "马戏团小丑")
+    check(unk["occ"] == 80 * 4 and not unk["known_occupation"],
+          "两边都没有的职业退回 EDU×4，并标成不认识")
+
+    # 一张**故意写烂**的卡：超支 + 超 90 + 低于基础值 + CR 越界 + 点了神话
+    rotten = {
+        "name": "烂卡", "occupation": "记者", "age": 30, "credit": 75,
+        "skills": {"母语": 95, "侦查": 95, "图书馆利用": 80, "话术": 70,
+                   "心理学": 60, "聆听": 55, "闪避": 12, "摄影": 40,
+                   "克苏鲁神话": 12, "开车": 30},
+    }
+    aud = chargen.audit_sheet(rotten, ca, "记者")
+    codes = {v["code"] for v in aud["violations"]}
+    check(not aud["ok"], "烂卡被判为不合规")
+    for code, label in (("over_cap", "超 90 被抓到"),
+                        ("below_base", "低于基础值被抓到"),
+                        ("credit_range", "信用评级越界被抓到"),
+                        ("mythos", "分配克苏鲁神话被抓到")):
+        check(code in codes, label,
+              next((v["detail"] for v in aud["violations"] if v["code"] == code), "（漏报）"))
+
+    fixed, fixes = chargen.repair_sheet(rotten, ca, "记者")
+    after = chargen.audit_sheet(fixed, ca, "记者")
+    check(after["ok"], "裁剪之后这张卡合规了",
+          f"修正 {len(fixes)} 处")
+    for f in fixes[:3]:
+        print(f"         · {f}")
+    vals = fixed["skills"]
+    check(max(vals.values()) <= 90, "没有任何技能超过 90",
+          f"最高 {max(vals.values())}")
+    check(all(v >= chargen.base_of(n, ca) for n, v in vals.items()),
+          "没有任何技能低于它的基础值")
+    check(vals.get("克苏鲁神话", 0) == 0, "克苏鲁神话被清零")
+    lo, hi = bs["credit"]
+    check(lo <= int(fixed["credit"]) <= hi, "信用评级被夹回职业区间",
+          f"{fixed['credit']} ∈ [{lo}, {hi}]")
+    check(after["spent"] <= after["budget"]["total"], "裁剪后合计不超预算",
+          f"{after['spent']} / {after['budget']['total']}")
+    check(after["spent_other"] <= after["budget"]["interest"],
+          "裁剪后非本职技能的点数不超兴趣点",
+          f"{after['spent_other']} / {after['budget']['interest']}")
+    # 确定性：同一张烂卡裁两次结果必须一样（不然每次开团数值都在飘）
+    again, _ = chargen.repair_sheet(rotten, ca, "记者")
+    check(again == fixed, "裁剪算法是确定性的（跑两次结果一样）")
+
+    # 极端：所有技能都顶到 99
+    extreme = {"name": "极端", "occupation": "医生", "credit": 200,
+               "skills": {k: 99 for k in (
+                   "医学", "急救", "心理学", "科学", "母语", "精神分析",
+                   "生物学", "化学", "药学", "图书馆利用", "侦查", "聆听")}}
+    ex_fixed, _ = chargen.repair_sheet(extreme, ca, "医生")
+    ex_after = chargen.audit_sheet(ex_fixed, ca, "医生")
+    check(ex_after["ok"], "全顶到 99 的卡也能被裁回合规")
+    check(max(ex_fixed["skills"].values()) <= 90, "裁完最高不超过 90")
+    check(30 <= int(ex_fixed["credit"]) <= 80, "医生的 CR 夹在 30–80",
+          str(ex_fixed["credit"]))
+
+    # 空卡 / 无职业，不能把引擎搞崩
+    empty_fixed, _ = chargen.repair_sheet({"name": "空"}, ca, "")
+    check(chargen.audit_sheet(empty_fixed, ca, "").get("ok") in (True, False),
+          "只有名字的卡不会把引擎搞崩",
+          str(sorted(empty_fixed.get("skills", {}))))
+
+    # 规范的**落地**：进场的卡一定合法
+    print("         ── 进场的卡一定合法 ──")
+    import re as _re3
+    import yaml as _y3
+    from engine.llm import MockClient as _MC
+    import random as _rnd
+    illegal = 0
+    for i in range(60):
+        rng2 = _rnd.Random(i)
+        at = chargen.roll_attributes(rng2)
+        txt = _MC(seed=i)._chargen(
+            "STR %d CON %d DEX %d APP %d POW %d SIZ %d INT %d EDU %d LUCK %d" % (
+                at["STR"], at["CON"], at["DEX"], at["APP"], at["POW"],
+                at["SIZ"], at["INT"], at["EDU"], at["LUCK"]))
+        sheet = _y3.safe_load(_re3.search(r"<sheet>(.*?)</sheet>", txt, _re3.S).group(1))
+        if not chargen.audit_sheet(sheet, at, sheet.get("occupation"))["ok"]:
+            illegal += 1
+    check(illegal == 0, "离线模型车 60 张卡，一张违规的都没有", f"{illegal} 张违规")
+
+    # 真跑一遍车卡流程，看日志里有没有把违规/修正说出来。
+    # 查的是 session.events（会话自己的流水）——外层那个 ev 中途被 clear 过好几次。
+    sess_ev = list(app.session.events) if app.session else []
+    viol_events = [e for e in sess_ev if str(e.get("text", "")).startswith("〔车卡")]
+    check(any("车卡结算" in str(e.get("text", "")) for e in viol_events),
+          "车卡结算摆到台面上了（花了多少 / 预算多少）",
+          next((str(e.get("text"))[:70] for e in viol_events
+                if "车卡结算" in str(e.get("text"))), "（没有）"))
+    # 每个座位的车卡账都记下来了
+    ledger = []
+    for seat in (app.cfg.get("seats") or []):
+        st = (app.session.seats or {}).get(seat.get("seat_id")) or {}
+        if st.get("chargen_budget"):
+            ledger.append(st["chargen_budget"].get("total"))
+    check(len(ledger) >= 3, "每个座位的车卡预算都留了档",
+          "、".join(str(x) for x in ledger))
+
+    # ★ 名字：引擎不预设角色名，AI 自己取；车卡前显示网名，之后显示「角色名（网名）」
+    print("         ── 名字 ──")
+    from engine.agents import PLAgent as _PLA
+    seat0 = next((s for s in app.cfg["seats"] if s["kind"] == "PL"), None)
+    check(seat0 is not None and not (seat0.get("character") or {}).get("name"),
+          "座位出厂时不带预设角色名", str((seat0 or {}).get("character")))
+    labels = {s["seat_id"]: s for s in app._seat_states()}
+    pl_seats = [s for s in labels.values() if s["kind"] == "PL"]
+    check(all(s["has_character"] for s in pl_seats),
+          "车完卡之后每个玩家都有角色了")
+    check(all("（" in (s["label"] or "") for s in pl_seats),
+          "车完卡后显示的是「角色名（网名）」",
+          "、".join(s["label"] for s in pl_seats))
+    check(all(s["player_name"] and s["player_name"] == s["label"].split("（")[-1].rstrip("）")
+              for s in pl_seats if s["player_name"]),
+          "括号里就是那个人的网名")
+    # 车卡阶段（没有角色）显示的就该是网名，不该冒出任何角色名
+    fresh_seat = cfgmod.make_pl_seat(0)
+    fresh_seat.update({"provider": "mock", "base_url": "", "api_key": "",
+                       "model": "mock-pl"})
+    fake = _PLA(fresh_seat, {"rules_detail": "lean"}, "label-test")
+    check(fake.table_label() == fresh_seat["profile"]["player_name"],
+          "还没车卡时，桌上叫的是网名",
+          f"{fake.table_label()}（网名 {fresh_seat['profile']['player_name']}）")
+    fake.adopt_character({"name": "哈里·杜邦", "occupation": "记者",
+                          "attributes": {"DEX": 60}, "skills": [], "inventory": []})
+    check(fake.table_label() == f"哈里·杜邦（{fresh_seat['profile']['player_name']}）",
+          "车出角色之后立刻改成「角色名（网名）」", fake.table_label())
+    check(fake.display_name == "哈里·杜邦",
+          "提示词与叙述里用的是角色名", fake.display_name)
+    # 每张进场的卡都真的合法
+    bad_cards = []
+    for seat in app.loop.pls if app.loop else []:
+        ch = seat.seat.get("character") or {}
+        at2 = (seat.seat.get("character") or {}).get("attributes") or {}
+        if not ch.get("skills"):
+            continue
+        sk = {s["name"]: s["value"] for s in ch["skills"] if isinstance(s, dict)}
+        if sk and max(sk.values()) > 90:
+            bad_cards.append(f"{seat.display_name}:{max(sk.values())}")
+    check(not bad_cards, "真跑出来的角色卡里没有超过 90 的技能",
+          "、".join(bad_cards) or "干净")
+
+    # ══════════════════════════════════════════ 15. 乱格式模组 + 单人研读室
+    print("\n【15】乱格式模组解析 + 只有导演和 KP 的研读室")
     import time as _time
     from engine import docread, module_lib, study as study_mod
 

@@ -631,6 +631,12 @@ class PLAgent(BaseAgent):
 
         `briefing` 是守秘人给全桌的赛前简报（不含剧透）。
         它只是建议——PL 完全可以不理，各车各的本来也是跑团的乐趣。
+
+        **技能点是唯一交给 AI 算的数字，所以这里卡得很死**（见 docs/车卡规范.md）：
+          1. 车完先按规范逐条核
+          2. 有违规就把它自己写的卡 + 违规清单一起还回去，重车一次
+          3. 不管第二版写成什么样，引擎都按确定性算法裁一遍
+        进场的卡一定是合法的。不是"警告一下但照样开跑"。
         """
         derived = chargen.derive(attrs)
         # 车卡时才补上「技能基础值表 + 技能点预算」——游玩阶段完全不注入
@@ -640,38 +646,77 @@ class PLAgent(BaseAgent):
                                                            briefing)}
         usr_text = (prompts.build_chargen_finalize_user(attrs, derived, list(chatter))
                     if chatter else prompts.build_chargen_user(attrs, derived))
-        usr_msg = {"role": "user", "content": usr_text}
+
+        def parse(text: str) -> tuple[dict[str, Any], str]:
+            tags_ = split_tags(text)
+            sheet_text = tags_.get("sheet") or ""
+            if not sheet_text:
+                m = re.search(r"<sheet>(.*?)(?:</sheet>|$)", text, re.S | re.I)
+                sheet_text = m.group(1) if m else ""
+            if not sheet_text.strip():
+                return {}, (tags_.get("ooc") or "").strip()
+            try:
+                loaded = yaml.safe_load(sheet_text)
+            except Exception:  # noqa: BLE001
+                return {}, (tags_.get("ooc") or "").strip()
+            return (loaded if isinstance(loaded, dict) else {}), \
+                (tags_.get("ooc") or "").strip()
+
         try:
-            res = self._call([sys_msg, usr_msg], phase="chargen")
-            text = res.text
+            res = self._call([sys_msg, {"role": "user", "content": usr_text}],
+                             phase="chargen")
         except LLMError as e:
             self.stats.errors += 1
             self.stats.last_error = e.message
             return {"ok": False, "error": e.message}
 
-        tags = split_tags(text)
-        sheet_text = tags.get("sheet") or ""
-        if not sheet_text:
-            m = re.search(r"<sheet>(.*?)(?:</sheet>|$)", text, re.S | re.I)
-            sheet_text = m.group(1) if m else ""
-        sheet: dict[str, Any] = {}
-        if sheet_text.strip():
-            try:
-                loaded = yaml.safe_load(sheet_text)
-                if isinstance(loaded, dict):
-                    sheet = loaded
-            except Exception as e:  # noqa: BLE001
-                return {"ok": False, "error": f"车卡输出不是合法 YAML：{e}",
-                        "raw": text[:800]}
+        text = res.text
+        sheet, ooc = parse(text)
         if not sheet.get("skills"):
             return {"ok": False, "error": "车卡输出里没有技能表。", "raw": text[:800]}
 
-        warnings = chargen.validate_sheet(sheet, attrs)
-        character = chargen.build_character_from_sheet(attrs, sheet)
-        ooc = (tags.get("ooc") or "").strip()
-        return {"ok": True, "sheet": sheet, "character": character,
-                "warnings": warnings, "ooc": ooc, "raw": text,
-                "attrs": attrs, "derived": derived}
+        # ---- 第一步：按规范核 ----
+        audit = chargen.audit_sheet(sheet, attrs, sheet.get("occupation"))
+        violations = list(audit["violations"])
+
+        # ---- 第二步：有问题就回炉一次（只给一次，省钱也防死循环）----
+        if violations and int(self.options.get("chargen_retry", 1)) > 0:
+            self.stats.repairs += 1
+            retry_user = prompts.build_chargen_retry_user(
+                attrs, derived, str(sheet.get("occupation") or ""), text,
+                violations, audit["budget"])
+            try:
+                res2 = self._call([
+                    sys_msg,
+                    {"role": "user", "content": usr_text},
+                    {"role": "assistant", "content": text.strip()},
+                    {"role": "user", "content": retry_user},
+                ], phase="chargen")
+                sheet2, ooc2 = parse(res2.text)
+                if sheet2.get("skills"):
+                    audit2 = chargen.audit_sheet(sheet2, attrs,
+                                                 sheet2.get("occupation"))
+                    # 只有"确实变干净了"才采纳，否则保留原稿（免得越改越远）
+                    if len(audit2["violations"]) < len(violations):
+                        sheet, text, ooc = sheet2, res2.text, ooc2 or ooc
+                        audit, violations = audit2, list(audit2["violations"])
+                        res = res2
+            except LLMError as e:
+                self.stats.errors += 1
+                self.stats.last_error = e.message
+
+        # ---- 第三步：引擎按确定性算法裁剪。进场的卡必须合法 ----
+        fixed_sheet, repairs = chargen.repair_sheet(sheet, attrs,
+                                                    sheet.get("occupation"))
+        character = chargen.build_character_from_sheet(attrs, fixed_sheet)
+        after = chargen.audit_sheet(fixed_sheet, attrs, fixed_sheet.get("occupation"))
+        return {"ok": True, "sheet": fixed_sheet, "character": character,
+                "warnings": [v["detail"] for v in violations] + list(audit["notes"]),
+                "violations": violations, "repairs": repairs,
+                "spent": after["spent"], "budget": after["budget"],
+                "ooc": ooc, "raw": text,
+                "attrs": attrs, "derived": derived,
+                "usage": res}
 
     def adopt_character(self, character: dict[str, Any],
                         profile: dict[str, Any] | None = None) -> None:
@@ -682,7 +727,31 @@ class PLAgent(BaseAgent):
         self.memory.character_sheet = dict(character)
         self.memory.situation["inventory"] = list(character.get("inventory") or [])
         self.memory.situation["conditions"] = list(character.get("conditions") or [])
+        # 车出角色之后，桌上叫的就是**角色的名字**了。
+        # 名字是 AI 自己取的，不是引擎预置的（见 config.make_pl_seat）。
+        nm = str(character.get("name") or "").strip()
+        if nm:
+            self.display_name = nm
+            self.seat["display_name"] = nm
         self._rebuild_system()
+
+    @property
+    def player_handle(self) -> str:
+        """桌面上怎么称呼**这个玩家本人**（网名简称）。"""
+        prof = self.seat.get("profile") or {}
+        return str(prof.get("player_name") or self.seat_id)
+
+    def table_label(self) -> str:
+        """给界面看的称呼。
+
+        车卡阶段（还没有角色）：就是网名——因为这会儿坐在这儿的确实是玩家本人。
+        车出角色之后：`角色名（网名）`——既认得出是谁在演，也认得出演的是谁。
+        """
+        nm = str((self.seat.get("character") or {}).get("name") or "").strip()
+        handle = self.player_handle
+        if not nm:
+            return handle
+        return f"{nm}（{handle}）" if handle and handle != nm else nm
 
     # -------------------------------------------------- 入戏锚定
 

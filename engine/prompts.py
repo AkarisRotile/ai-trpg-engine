@@ -976,7 +976,12 @@ def build_chargen_system(seat: dict[str, Any], rules: str, briefing: str = "") -
     profile = seat.get("profile") or {}
     player = profile.get("player_name") or seat.get("display_name") or seat.get("seat_id")
     pc = (seat.get("character") or {}).get("name") or ""
-    hint = f"（守秘人给你预留的名字是「{pc}」，你可以用，也可以自己改）" if pc else ""
+    # 只有**已经车完卡**（比如重跑一遍或者续档）才提那个名字。
+    # 车卡时不该有任何"预留名字"——以前这里会写「守秘人给你预留的名字是「X」」，
+    # 而那个 X 是引擎随手塞给座位的一个预设角色名，跟守秘人毫无关系。
+    # 名字是玩家自己的事，不该被暗示。
+    pc_note = (f"（你之前用的是「{pc}」，沿用或换掉都行，这是你的角色）"
+               if pc else "")
     brief_block = ""
     if (briefing or "").strip():
         brief_block = f"""
@@ -994,12 +999,16 @@ def build_chargen_system(seat: dict[str, Any], rules: str, briefing: str = "") -
 车卡这件事你很熟：属性是骰出来的不能改，技能点要按规则花干净，
 信用评级决定你身上有多少钱。你会认真分配，因为卡是要陪你跑完这一局的。
 
+**这个调查员是你自己的人。** 职业、技能、带什么东西、过去经历过什么，
+都由你定；**名字也由你取**——名字得像个活在那个年代的人，
+你想起什么就起什么，没人会替你定。{pc_note}
+
 # 规则
 {rules}
 
 # 你的行事风格
 {profile.get('playstyle', '均衡稳健')}
-（车卡时你要按这个风格选职业和技能——你车的是**你想玩的**那种角色）{hint}
+（车卡时你要按这个风格选职业和技能——你车的是**你想玩的**那种角色）
 
 # 你要输出什么
 
@@ -1011,7 +1020,7 @@ gender: 性别
 credit: 信用评级最终值
 skills:
   技能名: 最终值
-  ...（把职业点和兴趣点都花完，至少写 8 项）
+  ...（把职业点和兴趣点花完，至少写 8 项）
 inventory:
   - 身上带着的东西
 backstory: 三到五句。你为什么会在开局那个地方，你心里有没有过不去的坎。
@@ -1020,14 +1029,62 @@ backstory: 三到五句。你为什么会在开局那个地方，你心里有没
 （车完卡你想在桌边说的一句话，比如吐槽手气、或者跟别人说自己车了个什么）
 </ooc>
 
-技能写**最终值**，不用说你怎么分的。分配到技能上的点数总和
-（各项减去它的基础值再相加）不能超过职业点 + 兴趣点的预算。"""
+# 车卡铁律（引擎会逐条核，错了整张卡会被打回）
+
+1. 技能写**最终值**，不是投入的点数。花掉多少 = 最终值 − 该项基础值
+   （母语基础 = EDU，闪避 = DEX÷2，克苏鲁神话 = 0）。
+2. **两笔账分开**：职业点只能花在本职技能上，兴趣点什么都能点，不能互相挪用。
+3. **任何一项不得超过 90**，车卡阶段没有例外。
+4. **不得低于基础值**（侦查基础 25，就不能写 20）。
+5. 克苏鲁神话必须是 0。
+6. 信用评级要落在职业允许的区间里，它的点数从职业点里出。
+7. 点数不必花完，但绝不能超。"""
+
+
+def build_chargen_retry_user(attrs: dict[str, int], derived: dict[str, Any],
+                             occupation: str, previous: str,
+                             violations: list[dict[str, Any]],
+                             budget: dict[str, Any]) -> str:
+    """回炉：把违规清单**原样**交回去，让它重车一次。
+
+    光是说"你的卡有问题"模型改不对；必须把它错在哪、错多少、
+    正确范围是多少一起摆出来，它才知道往哪改。
+    """
+    lines = [f"· {v.get('detail', '')}" for v in violations if v.get("detail")]
+    return f"""\
+你上一版的车卡过不了引擎的核。这张是你刚写的：
+
+<上一版>
+{previous.strip()[:2200]}
+</上一版>
+
+# 引擎查出来的问题
+
+{chr(10).join(lines)}
+
+# 重新算一遍你的预算
+职业：{occupation}
+职业技能点 = {budget.get('formula', 'EDU×4')} = {budget.get('occ')}
+  （只能花在这些本职技能上：{'、'.join(budget.get('occ_skills') or []) or '（表里没有这个职业，不限制）'}）
+兴趣技能点 = INT×2 = {budget.get('interest')}
+合计 = {budget.get('total')}
+信用评级区间 = {budget.get('credit', [0, 99])[0]}–{budget.get('credit', [0, 99])[1]}
+
+# 怎么办
+
+重写一整张卡（还是 <sheet> 那套格式），**只改上面列出来的问题**，
+其余保持你原本想玩的样子——你的职业、性格、带的东西、背景都不用动。
+这一版的最终值必须：每一项 ≤ 90、每一项 ≥ 它的基础值、
+职业点的去处都在本职技能里、信用评级在区间内、合计不超 {budget.get('total')} 点。
+"""
 
 
 def build_chargen_user(attrs: dict[str, int], derived: dict[str, Any],
                        occupation_hint: str = "") -> str:
     a = attrs
     occ = f"\n守秘人建议的职业方向：{occupation_hint}" if occupation_hint else ""
+    edu = int(a.get("EDU", 0))
+    intel = int(a.get("INT", 0))
     return f"""\
 守秘人替你掷好了属性。骰子在守秘人手里，这些数不能改：
 
@@ -1042,12 +1099,19 @@ LUCK {a.get('LUCK')}
 伤害加值 DB {derived.get('DB', '0')}       （STR+SIZ = {a.get('STR', 0) + a.get('SIZ', 0)}）
 移动 MOV {derived.get('MOV', 8)}
 
-你的技能点预算：
-  职业技能点 = EDU×4 = {a.get('EDU', 0) * 4}
-  兴趣技能点 = INT×2 = {a.get('INT', 0) * 2}
-  合计 = {a.get('EDU', 0) * 4 + a.get('INT', 0) * 2}{occ}
+你自己得留意的几项基础值（它们不是 0，别把它们写没了）：
+母语 = EDU = {edu}　　闪避 = DEX÷2 = {int(a.get('DEX', 0)) // 2}　　克苏鲁神话 = 0
 
-现在车你的卡。按上面的格式输出。"""
+你的技能点预算——**这是两笔账，不能互相挪用**：
+  职业技能点 = EDU×4 = {edu * 4}
+    ↑ 只能花在你这个职业的本职技能上
+  兴趣技能点 = INT×2 = {intel * 2}
+    ↑ 任何技能都能点
+  合计 = {edu * 4 + intel * 2}{occ}
+
+选好职业后，信用评级要从职业点里出，并且落在那个职业允许的区间里。
+
+现在车你的卡。按上面的格式输出，技能写**最终值**。"""
 
 
 def build_anchoring_user(opening: str, pc: str, time_block: str = "") -> str:

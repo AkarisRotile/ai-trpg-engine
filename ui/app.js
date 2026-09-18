@@ -134,6 +134,12 @@ function addEntry(evt) {
   node.dataset.type = type;
   if (evt.seat_id) node.dataset.seat = evt.seat_id;
 
+  // 玩家的条目统一用引擎给的 label：车卡阶段是网名（坐在这儿的是玩家本人），
+  // 车出角色之后是「角色名（网名）」。守秘人那边不动——它的条目写「守秘人」更有味道。
+  let who = evt.name || '';
+  const seat = ((S.state && S.state.seats) || []).find((s) => s.seat_id === evt.seat_id);
+  if (seat && seat.kind === 'PL' && seat.label && seat.has_character) who = seat.label;
+
   if (type === 'scene') {
     node.textContent = `—— ${esc(evt.text)} ——`;
   } else if (type === 'system') {
@@ -148,7 +154,7 @@ function addEntry(evt) {
       study_report: '的通读报告 · 只给你看',
       audit: (evt.meta && evt.meta.title) || '审卡',
     }[type];
-    who.appendChild(el('span', null, `${meta.icon} ${esc(evt.name || '')} ${label}`));
+    who.appendChild(el('span', null, `${meta.icon} ${esc(who)} ${label}`));
     node.appendChild(who);
     if (type === 'audit' && evt.meta && evt.meta.rows) {
       const tbl = el('div', 'audit-rows');
@@ -198,7 +204,7 @@ function addEntry(evt) {
     }
   } else {
     const who = el('div', 'who');
-    const nameLabel = evt.name ? `${esc(evt.name)}` : '';
+    const nameLabel = who ? `${esc(who)}` : '';
     const seatTag = type === 'ooc' ? '桌边' : meta.label;
     who.appendChild(el('span', null, `${meta.icon} ${nameLabel}`));
     who.appendChild(el('span', 'tag', seatTag));
@@ -270,14 +276,16 @@ function renderSeats() {
 
     const name = el('div', 'name');
     name.appendChild(el('span', null, s.kind === 'KP' ? '🔒' : '🎭'));
-    name.appendChild(el('span', null, esc(s.display_name || s.seat_id)));
+    // label 由引擎给：车卡前是网名，车出角色后是「角色名（网名）」
+    name.appendChild(el('span', null, esc(s.label || s.display_name || s.seat_id)));
     if (s.kind === 'KP') name.appendChild(el('span', 'pill', 'KP'));
     name.appendChild(el('span', 'pill ' + (s.set_up ? 'ok' : 'err'),
       s.set_up ? '已配' : '缺配置'));
     n.appendChild(name);
 
     const sub = [];
-    if (s.player_name) sub.push('玩家 ' + s.player_name);
+    if (s.has_character && s.player_name) sub.push('玩家 ' + s.player_name);
+    if (!s.has_character && s.kind === 'PL') sub.push('还没车卡');
     if (s.occupation) sub.push(s.occupation);
     sub.push(s.provider + ' / ' + s.model);
     n.appendChild(el('div', 'sub', sub.join(' · ')));

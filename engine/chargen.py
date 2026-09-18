@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import random
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from .dice import BASE_SKILLS, damage_bonus, mov_rate
@@ -252,51 +253,574 @@ def budget(attrs: dict[str, int]) -> int:
     return int(attrs.get("EDU", 0)) * 4 + int(attrs.get("INT", 0)) * 2
 
 
-def validate_sheet(sheet: dict[str, Any], attrs: dict[str, int]) -> list[str]:
-    """按规则书校验 AI 车出来的卡。返回警告列表（空 = 合规）。"""
-    warns: list[str] = []
-    if not str(sheet.get("name") or "").strip():
-        warns.append("卡上没有名字")
-    if not str(sheet.get("occupation") or "").strip():
-        warns.append("卡上没有职业")
+# ══════════════════════════════════════════════════════════════ 车卡规范
+#
+# 车卡是整个引擎里**唯一一处让 AI 自己算数字**的地方：属性是引擎掷的、
+# 骰子是引擎掷的、伤害是引擎算的，只有技能点分配交给了 AI。
+# 而模型算加法非常不可靠——它会给自己多分几十点、把技能顶到 95%，
+# 而且自己不觉得有问题。所以规矩必须由代码兜住。
+#
+# 完整规范见 docs/车卡规范.md；这里和那份文档必须一致。
 
+SKILL_CAP = 90          # 车卡阶段单项上限（规则书：创建时不得超过 90）
+CREDIT = "信用评级"
+
+# 本职技能表里没有、但永远算"本职"的几项（母语是所有职业的共同底子）
+_COMMON_OCC_SKILLS = ("母语",)
+
+
+@dataclass(frozen=True)
+class OccupationSpec:
+    """一个职业的车卡参数。
+
+    formula 是职业技能点的算法：`(("EDU", 4),)` 表示 EDU×4；
+    刑警这类有两个属性的是 `(("EDU", 2), ("DEX", 2))`。
+    credit 是这个职业允许的信用评级区间，CR 的点数从职业点里出。
+    """
+    name: str
+    formula: tuple[tuple[str, int], ...] = (("EDU", 4),)
+    credit: tuple[int, int] = (0, 99)
+    skills: tuple[str, ...] = ()
+
+
+# 表里没有的职业退回 EDU×4 / CR 0-99，并且跳过"本职技能"那两条检查——
+# 无从判断哪些算本职，硬判会冤枉人。
+OCCUPATION_SPECS: dict[str, OccupationSpec] = {
+    "记者": OccupationSpec("记者", credit=(9, 30), skills=(
+        "母语", "图书馆利用", "话术", "心理学", "侦查", "聆听", "摄影", "历史")),
+    "私家侦探": OccupationSpec(
+        "私家侦探", formula=(("EDU", 2), ("DEX", 2)), credit=(9, 30), skills=(
+            "侦查", "心理学", "聆听", "射击", "法律", "图书馆利用",
+            "锁匠", "潜行", "话术", "会计")),
+    "医生": OccupationSpec("医生", credit=(30, 80), skills=(
+        "医学", "急救", "心理学", "科学", "母语", "精神分析",
+        "生物学", "化学", "药学", "信用评级")),
+    "教授": OccupationSpec("教授", credit=(20, 70), skills=(
+        "图书馆利用", "母语", "历史", "神秘学", "说服", "心理学",
+        "考古学", "人类学", "科学")),
+    "古董商": OccupationSpec("古董商", credit=(30, 50), skills=(
+        "估价", "历史", "图书馆利用", "说服", "会计", "妙手",
+        "侦查", "话术", "信用评级")),
+    "神职人员": OccupationSpec("神职人员", credit=(9, 60), skills=(
+        "说服", "心理学", "母语", "历史", "聆听", "图书馆利用", "信用评级")),
+    "刑警": OccupationSpec(
+        "刑警", formula=(("EDU", 2), ("DEX", 2)), credit=(20, 50), skills=(
+            "射击", "侦查", "恐吓", "法律", "聆听", "闪避", "心理学",
+            "追踪", "格斗", "信用评级")),
+    "作家": OccupationSpec("作家", credit=(9, 30), skills=(
+        "母语", "图书馆利用", "心理学", "历史", "神秘学", "说服", "侦查")),
+    "摄影师": OccupationSpec("摄影师", credit=(9, 30), skills=(
+        "摄影", "侦查", "母语", "潜行", "攀爬", "聆听", "心理学", "化学")),
+    "护士": OccupationSpec("护士", credit=(9, 30), skills=(
+        "急救", "医学", "心理学", "聆听", "母语", "说服", "科学", "精神分析")),
+    "律师": OccupationSpec("律师", credit=(30, 80), skills=(
+        "法律", "说服", "母语", "会计", "图书馆利用", "心理学",
+        "话术", "信用评级")),
+    "退役军官": OccupationSpec(
+        "退役军官", formula=(("EDU", 2), ("STR", 2)), credit=(20, 70), skills=(
+            "射击", "格斗", "闪避", "攀爬", "恐吓", "母语", "急救",
+            "导航", "信用评级")),
+}
+
+
+def occ_spec(occupation: str | None) -> OccupationSpec:
+    """查职业参数。表里没有就给一个最保守的默认（并标记为"不认识"）。"""
+    name = (occupation or "").strip()
+    return OCCUPATION_SPECS.get(name) or OccupationSpec(name or "（未填职业）")
+
+
+# 卡上的技能名和引擎里的写法不完全一样，对不上就会把本职技能判成非本职，
+# 于是"兴趣点超支"满屏乱报。这张表把两边对齐。
+SKILL_ALIASES: dict[str, str] = {
+    "图书馆使用": "图书馆利用",
+    "斗殴": "格斗",
+    "手枪": "射击",
+    "步枪": "射击",
+    "霰弹枪": "射击",
+    "冲锋枪": "射击",
+    "机枪": "射击",
+    "重武器": "射击",
+    "撬锁": "锁匠",
+    "开锁": "锁匠",
+    "汽车驾驶": "汽车驾驶",
+    "驾驶": "汽车驾驶",
+    "自然学": "博物学",
+    "领航": "导航",
+    "信誉": "信用评级",
+    "信用": "信用评级",
+    "魅惑": "取悦",
+    "闪避": "闪避",
+    "计算机使用": "计算机",
+    "电脑": "计算机",
+}
+
+
+def same_skill(a: str, b: str) -> bool:
+    """两个技能名是不是同一个（跨卡/引擎两套命名）。"""
+    na = _norm_skill_name(a)
+    nb = _norm_skill_name(b)
+    if not na or not nb:
+        return False
+    return na == nb or SKILL_ALIASES.get(na, na) == SKILL_ALIASES.get(nb, nb)
+
+
+def _norm_skill_name(name: str) -> str:
+    import re as _re
+    return _re.sub(r"[：:、,，.。\s（）()①②③④⑤⑥⑦⑧⑨]+", "",
+                   (name or "").strip())
+
+
+def _is_occupation_skill(name: str, occ_skills: list[str]) -> bool:
+    if not occ_skills:
+        return True                      # 没有本职清单就不限制
+    if name == CREDIT or name in _COMMON_OCC_SKILLS:
+        return True
+    return any(same_skill(name, s) for s in occ_skills)
+
+
+def budget_split(attrs: dict[str, int], occupation: str | None = None) -> dict[str, Any]:
+    """把预算拆成**两笔账**。
+
+    职业技能点只能花在本职技能上，兴趣技能点随便花——这是规则书里
+    最容易被模型忽略的一条，所以引擎自己算，不交给它。
+
+    **优先用用户那张卡**（`职业列表` 里的公式、信用区间、本职技能矩阵），
+    卡读不到才退回引擎里内置的那张表。卡才是权威：
+    引擎一开始就猜错了好几处（记者其实是「教育×2＋外貌或敏捷×2」）。
+    """
+    name = (occupation or "").strip()
+    from . import cardcalc
+
+    occ = cardcalc.find_occupation(name) if name else None
+    if occ is not None:
+        return {
+            "occ": int(occ.points(attrs)),
+            "interest": int(attrs.get("INT", 0)) * 2,
+            "total": int(occ.points(attrs)) + int(attrs.get("INT", 0)) * 2,
+            "formula": occ.formula_text or "教育×4",
+            "credit": [int(occ.credit[0]), int(occ.credit[1])],
+            "occ_skills": list(occ.skills),
+            "known_occupation": True,
+            "occupation": occ.name,
+            "source": "card",
+        }
+
+    spec = occ_spec(name)
+    known = spec.name in OCCUPATION_SPECS
+    if known:
+        occ_points = sum(int(attrs.get(a, 0)) * m for a, m in spec.formula)
+        formula_txt = " + ".join(f"{a}×{m}" for a, m in spec.formula)
+    else:
+        occ_points = int(attrs.get("EDU", 0)) * 4
+        formula_txt = "EDU×4（这个职业不在表里，按通用公式算）"
+    interest_points = int(attrs.get("INT", 0)) * 2
+    return {
+        "occ": int(occ_points),
+        "interest": int(interest_points),
+        "total": int(occ_points) + int(interest_points),
+        "formula": formula_txt,
+        "credit": list(spec.credit),
+        "occ_skills": list(spec.skills) if known else [],
+        "known_occupation": known,
+        "occupation": spec.name,
+        "source": "builtin" if known else "default",
+    }
+
+
+def _skill_items(sheet: dict[str, Any]) -> list[tuple[str, int]]:
+    """把卡上的技能表读成 [(名字, 数值)]，坏值直接丢掉。"""
     raw = sheet.get("skills") or {}
-    if not isinstance(raw, dict):
-        return warns + ["skills 不是键值对，无法解析"]
-    if len(raw) < 6:
-        warns.append(f"只写了 {len(raw)} 项技能，正常一张卡至少 8 项")
-
-    spent = 0
-    for name, value in raw.items():
-        try:
-            v = int(value)
-        except (TypeError, ValueError):
-            warns.append(f"「{name}」的数值不是数字")
+    items: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    if isinstance(raw, dict):
+        pairs = list(raw.items())
+    elif isinstance(raw, list):
+        pairs = []
+        for item in raw:
+            if isinstance(item, dict) and "name" in item:
+                pairs.append((item.get("name"), item.get("value", 0)))
+            elif isinstance(item, (list, tuple)) and len(item) == 2:
+                pairs.append((item[0], item[1]))
+    else:
+        pairs = []
+    for name, value in pairs:
+        nm = str(name or "").strip()
+        if not nm or nm in seen:
             continue
+        try:
+            items.append((nm, int(float(value))))
+        except (TypeError, ValueError):
+            continue
+        seen.add(nm)
+    return items
+
+
+def audit_sheet(sheet: dict[str, Any], attrs: dict[str, int],
+                occupation: str | None = None) -> dict[str, Any]:
+    """按规范逐条审。返回结构化结果，**既给回炉提示词用，也给界面用**。
+
+    和旧版的区别：这里把"职业点/兴趣点"分开算，所以能抓到
+    「拿职业点去点本职之外的技能」这种以前根本看不见的超支。
+    """
+    occ = (occupation or sheet.get("occupation") or "").strip()
+    b = budget_split(attrs, occ)
+    items = _skill_items(sheet)
+    credit_val = None
+    try:
+        if sheet.get("credit") is not None:
+            credit_val = int(float(sheet.get("credit")))
+    except (TypeError, ValueError):
+        credit_val = None
+
+    violations: list[dict[str, Any]] = []
+    notes: list[str] = []
+    cap = SKILL_CAP
+
+    if not str(sheet.get("name") or "").strip():
+        violations.append({"code": "no_name", "detail": "卡上没有名字"})
+    if not occ:
+        violations.append({"code": "no_occ", "detail": "卡上没有职业"})
+    if len(items) < 6:
+        notes.append(f"只写了 {len(items)} 项技能，正常一张卡至少 8 项")
+
+    spent_occ_skills = 0        # 花在本职技能上的点数
+    spent_other = 0             # 花在本职之外的技能上的点数
+    for name, value in items:
+        base = base_of(name, attrs)
         if name == "克苏鲁神话":
-            warns.append("车卡阶段不该分配克苏鲁神话技能")
+            # 列在卡上、值为 0 是正常的（标准卡就有这一栏）；
+            # 分配过点数才是违规。
+            if value > 0:
+                violations.append({"code": "mythos", "skill": name, "value": value,
+                                   "detail": "车卡阶段不允许分配克苏鲁神话"})
             continue
-        if v > 90:
-            warns.append(f"「{name}」{v}% 超过了 90 的合理上限")
-        spent += max(0, v - base_of(name, attrs))
+        if value > cap:
+            violations.append({"code": "over_cap", "skill": name, "value": value,
+                               "cap": cap,
+                               "detail": f"「{name}」{value}% 超过车卡上限 {cap}%"})
+        if value < base:
+            violations.append({"code": "below_base", "skill": name, "value": value,
+                               "base": base,
+                               "detail": f"「{name}」{value}% 低于它的基础值 {base}%"})
+        alloc = max(0, min(value, cap) - base)
+        is_occ = _is_occupation_skill(name, b["occ_skills"]) \
+            if b["known_occupation"] else True
+        if is_occ:
+            spent_occ_skills += alloc
+        else:
+            spent_other += alloc
 
-    cap = budget(attrs)
-    if spent > cap:
-        warns.append(f"技能点超支：花掉 {spent} 点，预算只有 {cap} 点")
+    spent = spent_occ_skills + spent_other
 
-    credit = sheet.get("credit")
-    if credit is not None:
+    # 信用评级
+    lo, hi = b["credit"]
+    if credit_val is None and CREDIT not in {n for n, _ in items}:
+        violations.append({"code": "no_credit",
+                           "detail": f"没有写信用评级（{occ or '这个职业'}要求 "
+                                     f"{lo}–{hi}）"})
+    elif credit_val is not None:
+        if not (lo <= credit_val <= hi):
+            violations.append({"code": "credit_range", "value": credit_val,
+                               "range": [lo, hi],
+                               "detail": f"信用评级 {credit_val} 不在 "
+                                         f"{occ or '本职'}的 {lo}–{hi} 区间内"})
+
+    if b["known_occupation"]:
+        # **只查得动这一条**：花在本职之外的技能上的点数，只可能来自兴趣点。
+        # 反过来说，「本职技能花掉多少」是**推不出来**的——兴趣点本来就可以
+        # 点本职技能，所以没法从最终值反推哪笔账付的。硬判会冤枉人，
+        # 这一条就不查了（要查得让 AI 额外申报每点的来源，代价大、还容易解析失败）。
+        if spent_other > b["interest"]:
+            violations.append({
+                "code": "interest_over", "spent": spent_other,
+                "budget": b["interest"],
+                "detail": f"兴趣点超支：本职之外的技能花掉 {spent_other} 点，"
+                          f"兴趣点只有 {b['interest']} 点"
+                          f"（这些点数只可能来自兴趣点）"})
+
+    if spent > b["total"]:
+        violations.append({
+            "code": "total_over", "spent": spent, "budget": b["total"],
+            "detail": f"技能点超支：合计花掉 {spent} 点，"
+                      f"预算只有 {b['total']} 点（职业 {b['occ']} + 兴趣 {b['interest']}）"})
+    elif spent < b["total"]:
+        notes.append(f"还剩 {b['total'] - spent} 点没用（不违规，想用满可以用满）")
+
+    return {
+        "ok": not violations,
+        "violations": violations,
+        "notes": notes,
+        "spent": spent,
+        "spent_occ_skills": spent_occ_skills,
+        "spent_other": spent_other,
+        "budget": b,
+        "credit": credit_val,
+        "skills": items,
+        "cap": cap,
+    }
+
+
+def validate_sheet(sheet: dict[str, Any], attrs: dict[str, int],
+                   occupation: str | None = None) -> list[str]:
+    """按规范校验，返回人话警告列表（空 = 合规）。"""
+    audit = audit_sheet(sheet, attrs, occupation)
+    return [v["detail"] for v in audit["violations"]] + list(audit["notes"])
+
+
+def allocate(sheet: dict[str, Any], attrs: dict[str, int],
+             occupation: str | None = None) -> tuple[dict[str, Any], list[str],
+                                                     dict[str, Any]]:
+    """把卡裁成合法，并且**算清每个技能的点数出自哪本账**。
+
+    为什么非要算这个：那张 Excel 卡自己就是个计算器——技能表的
+    「职业」列和「兴趣」列分开写，`人物卡!J50` 会当场显示
+    「剩余职业点=… 剩余兴趣点=…」。要是引擎只写个总数、或者一律
+    把本职技能的点全塞进职业列，那张卡一打开两本账就都不平，
+    用户看到的是"这程序算错了"。
+
+    规则：
+      1. 本职技能（含母语、信用评级）先用职业点付，职业点用完了剩下的走兴趣点
+      2. 非本职技能只能用兴趣点
+      3. 信用评级必须从职业点里出
+      4. 哪本账超了就削哪本，削到刚好用完；单项不低于基础值、不高于 90
+
+    返回 (卡, 修正说明, 分配表)。分配表直接交给 sheet.write_sheet。
+    """
+    occ = (occupation or sheet.get("occupation") or "").strip()
+    b = budget_split(attrs, occ)
+    fixes: list[str] = []
+
+    # ---- 1. 逐项夹到合法范围 ----
+    vals: dict[str, int] = {}
+    for name, value in _skill_items(sheet):
+        if name == "克苏鲁神话":
+            if value != 0:
+                fixes.append(f"「{name}」{value} → 0（车卡阶段不分配神话技能）")
+            vals[name] = 0
+            continue
+        base = base_of(name, attrs)
+        v = int(value)
+        if v < base:
+            fixes.append(f"「{name}」{v} → {base}（不得低于基础值）")
+            v = base
+        if v > SKILL_CAP:
+            fixes.append(f"「{name}」{v} → {SKILL_CAP}（超过车卡上限 {SKILL_CAP}）")
+            v = SKILL_CAP
+        vals[name] = v
+    if not any(same_skill(n, "闪避") for n in vals):
+        vals["闪避"] = base_of("闪避", attrs)
+
+    # ---- 2. 信用评级：夹进职业区间，最低吃 lo 点职业点 ----
+    lo, hi = b["credit"]
+    cr_name = next((n for n in vals if same_skill(n, CREDIT)), CREDIT)
+    raw_cr = vals.get(cr_name)
+    if raw_cr is None:
         try:
-            c = int(credit)
-            if not 0 <= c <= 99:
-                warns.append(f"信用评级 {c} 超出 0-99 范围")
+            raw_cr = int(float(sheet.get("credit"))) \
+                if sheet.get("credit") is not None else None
         except (TypeError, ValueError):
-            warns.append("信用评级不是数字")
-    return warns
+            raw_cr = None
+    if raw_cr is None:
+        raw_cr = lo
+        fixes.append(f"补上信用评级 {lo}（{occ or '本职'}的区间是 {lo}–{hi}，"
+                     f"点数从职业点里出）")
+    elif not (lo <= raw_cr <= hi):
+        fixed = min(max(int(raw_cr), lo), hi)
+        fixes.append(f"信用评级 {raw_cr} → {fixed}"
+                     f"（{occ or '本职'}的区间是 {lo}–{hi}）")
+        raw_cr = fixed
+    vals[cr_name] = int(raw_cr)
+
+    # ---- 3. 两本账分配 ----
+    def is_occ_skill(name: str) -> bool:
+        return _is_occupation_skill(name, b["occ_skills"]) \
+            if b["known_occupation"] else True
+
+    # 信用评级和母语优先吃职业点，其余本职技能按名字序（结果稳定）
+    order = sorted(vals, key=lambda n: (0 if same_skill(n, CREDIT) else
+                                        1 if same_skill(n, "母语") else 2, n))
+    occ_left, int_left = b["occ"], b["interest"]
+    plan: dict[str, dict[str, int]] = {}
+    for name in order:
+        base = base_of(name, attrs)
+        want = vals[name] - base
+        o = i = 0
+        if is_occ_skill(name):
+            o = min(want, occ_left)
+            occ_left -= o
+            want -= o
+        i = min(want, int_left)
+        int_left -= i
+        want -= i
+        if want > 0:
+            # 两本账都掏空了：这个技能只能降下来
+            vals[name] -= want
+            fixes.append(f"预算不够，「{name}」再降 {want} → {vals[name]}")
+        plan[name] = {"base": base, "occ": o, "interest": i}
+
+    used_occ = sum(p["occ"] for p in plan.values())
+    used_int = sum(p["interest"] for p in plan.values())
+    if used_occ or used_int:
+        fixes.append(f"两本账：职业点 {used_occ}/{b['occ']}，"
+                     f"兴趣点 {used_int}/{b['interest']}")
+
+    out_sheet = dict(sheet)
+    out_sheet["skills"] = {n: vals[n] for n in sorted(vals)}
+    out_sheet["credit"] = vals.get(cr_name, lo)
+    out_sheet["occupation"] = occ or out_sheet.get("occupation") or "流浪者"
+    report = {
+        "occupation": out_sheet["occupation"],
+        "budget": b,
+        "credit": out_sheet["credit"],
+        "credit_range": [lo, hi],
+        "rows": plan,
+        "used_occ": used_occ,
+        "used_interest": used_int,
+        "left_occ": b["occ"] - used_occ,
+        "left_interest": b["interest"] - used_int,
+    }
+    return out_sheet, fixes, report
+
+
+def repair_sheet(sheet: dict[str, Any], attrs: dict[str, int],
+                 occupation: str | None = None) -> tuple[dict[str, Any], list[str]]:
+    """裁剪并规范化（只要卡和修正说明）。"""
+    fixed, fixes, _plan = allocate(sheet, attrs, occupation)
+    return fixed, fixes
+
+
+def _repair_sheet_legacy(sheet: dict[str, Any], attrs: dict[str, int],
+                         occupation: str | None = None) -> tuple[dict[str, Any], list[str]]:
+    """旧版按"总账"削的裁剪，留着做对照。"""
+    occ = (occupation or sheet.get("occupation") or "").strip()
+    b = budget_split(attrs, occ)
+    items = _skill_items(sheet)
+    fixes: list[str] = []
+
+    # 1-3：逐项夹
+    clamped: list[tuple[str, int]] = []
+    for name, value in items:
+        if name == "克苏鲁神话":
+            if value != 0:
+                fixes.append(f"「{name}」{value} → 0（车卡阶段不分配神话技能）")
+            clamped.append((name, 0))
+            continue
+        base = base_of(name, attrs)
+        v = value
+        if v < base:
+            fixes.append(f"「{name}」{v} → {base}（不得低于基础值）")
+            v = base
+        if v > SKILL_CAP:
+            fixes.append(f"「{name}」{v} → {SKILL_CAP}（超过车卡上限 {SKILL_CAP}）")
+            v = SKILL_CAP
+        clamped.append((name, v))
+
+    if not any(n == "闪避" for n, _ in clamped):
+        clamped.append(("闪避", base_of("闪避", attrs)))
+
+    # 4：信用评级
+    lo, hi = b["credit"]
+    have_credit = any(n == CREDIT for n, _ in clamped)
+    raw_credit = sheet.get("credit")
+    credit_val: int | None = None
+    if have_credit:
+        credit_val = dict(clamped)[CREDIT]
+    elif raw_credit is not None:
+        try:
+            credit_val = int(float(raw_credit))
+        except (TypeError, ValueError):
+            credit_val = None
+    if credit_val is None:
+        credit_val = lo
+        fixes.append(f"补上信用评级 {credit_val}（{occ or '本职'}的区间是 {lo}–{hi}，"
+                     f"点数从职业点里出）")
+    elif not (lo <= credit_val <= hi):
+        fixed = min(max(credit_val, lo), hi)
+        fixes.append(f"信用评级 {credit_val} → {fixed}（{occ or '本职'}的区间是 {lo}–{hi}）")
+        credit_val = fixed
+    clamped = [(n, v) for n, v in clamped if n != CREDIT]
+    clamped.append((CREDIT, credit_val))
+
+    # 5：削超支。
+    #    注意是**两本分账各自削**——只按总账削的话，
+    #    「职业点超了、兴趣点还剩一大半」这种最常见的情况根本削不到。
+    vals: dict[str, int] = dict(clamped)
+
+    def alloc_of(name: str) -> int:
+        return max(0, vals[name] - base_of(name, attrs))
+
+    def shave(candidates: list[str], excess: int) -> int:
+        """从投得最多的开始削，削到刚好用完。信用评级不动（那是职业身份）。"""
+        order = sorted([n for n in candidates if n != CREDIT],
+                       key=lambda n: (-alloc_of(n), n))
+        for name in order:
+            if excess <= 0:
+                break
+            take = min(alloc_of(name), excess)
+            if take <= 0:
+                continue
+            before = vals[name]
+            vals[name] = before - take
+            fixes.append(f"超支 {take} 点，从「{name}」{before} → {vals[name]}")
+            excess -= take
+        return excess
+
+    occ_names = set(b["occ_skills"]) | set(_COMMON_OCC_SKILLS) | {CREDIT}
+    if b["known_occupation"]:
+        # 只有"本职之外的技能"这条查得动（见 audit_sheet 里的说明）
+        others = [n for n in vals
+                  if not _is_occupation_skill(n, b["occ_skills"])]
+        over = sum(alloc_of(n) for n in others) - b["interest"]
+        if over > 0:
+            shave(others, over)
+    # 兜底：总账
+    over = sum(alloc_of(n) for n in vals) - b["total"]
+    if over > 0:
+        shave(list(vals), over)
+
+    # 削完再核一遍；万一还有漏网的账，从总账再削一轮
+    for _ in range(3):
+        left = audit_sheet({"occupation": occ, "credit": vals.get(CREDIT),
+                            "skills": vals}, attrs, occ)
+        codes = {v["code"] for v in left["violations"]}
+        if not (codes & {"total_over", "interest_over"}):
+            break
+        over = max(0, sum(alloc_of(n) for n in vals)
+                   - (b["occ"] + b["interest"]))
+        if over <= 0:
+            break
+        shave(list(vals), over)
+
+    clamped = sorted(vals.items(), key=lambda x: x[0])
+    out_sheet = dict(sheet)
+    out_sheet["skills"] = {n: v for n, v in sorted(clamped, key=lambda x: x[0])}
+    out_sheet["credit"] = credit_val
+    out_sheet["occupation"] = occ or out_sheet.get("occupation") or "流浪者"
+    return out_sheet, fixes
+
+
+def repair_character(char: dict[str, Any], attrs: dict[str, int],
+                     occupation: str | None = None) -> tuple[dict[str, Any], list[str]]:
+    """给已经成型的角色结构做同一套裁剪（技能表是 [{name,value}] 那种）。"""
+    items = [(str(s.get("name", "")), int(s.get("value", 0)))
+             for s in (char.get("skills") or []) if isinstance(s, dict)]
+    sheet = {"name": char.get("name"), "occupation": occupation or char.get("occupation"),
+             "credit": None, "skills": dict(items)}
+    fixed, notes = repair_sheet(sheet, attrs, occupation)
+    skills = [{"name": n, "value": v} for n, v in (fixed.get("skills") or {}).items()]
+    out = dict(char)
+    out["skills"] = skills
+    if fixed.get("occupation"):
+        out["occupation"] = fixed["occupation"]
+    return out, notes
 
 
 def build_character_from_sheet(attrs: dict[str, int], sheet: dict[str, Any]) -> dict[str, Any]:
-    """把 AI 车好的卡合成为引擎使用的角色结构。"""
+    """把 AI 车好的卡合成为引擎使用的角色结构。
+
+    **先裁剪再合成**：进场的卡一定合法，不存在"警告一下但照样开跑"。
+    """
+    sheet, _fixes = repair_sheet(sheet, attrs, sheet.get("occupation"))
     raw = sheet.get("skills") or {}
     skills: list[tuple[str, int]] = []
     if isinstance(raw, dict):

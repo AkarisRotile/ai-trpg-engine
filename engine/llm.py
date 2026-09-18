@@ -490,30 +490,63 @@ class MockClient(BaseClient):
 
         occ = self.rng.choice(chargen.OCCUPATIONS)
         pack = chargen._skill_pack(occ)
-        cap = chargen.budget(attrs) if len(attrs) == 9 else 300
+        b = chargen.budget_split(attrs, occ) if len(attrs) == 9 \
+            else {"occ": 240, "interest": 120, "total": 360,
+                  "credit": [9, 30], "occ_skills": [], "known_occupation": False}
 
-        # 从**基础值**起步再分配预算——这才是真实车卡的做法，
-        # 也能保证脚本生成的卡一定过 engine.chargen.validate_sheet 的校验。
-        targets: list[list] = [[name, chargen.base_of(name, attrs)] for name, _ in pack]
-        for name in self.rng.sample(
-                ["侦查", "聆听", "急救", "潜行", "心理学", "图书馆利用", "话术"], k=2):
-            if all(t[0] != name for t in targets):
-                targets.append([name, chargen.base_of(name, attrs)])
+        # 离线 mock 也得**当个守规矩的玩家**（见 docs/车卡规范.md）：
+        # 职业点只花在本职技能上、兴趣点花在附加技能上、单项不过 90、
+        # 信用评级落在职业区间里。不然自检里天天是"违规→回炉→裁剪"，
+        # 真出问题的时候反而看不出来。
+        occ_targets: list[list] = []
+        for name in b["occ_skills"] or [n for n, _ in pack]:
+            if all(t[0] != name for t in occ_targets):
+                occ_targets.append([name, chargen.base_of(name, attrs)])
+        if not occ_targets:
+            occ_targets = [[n, chargen.base_of(n, attrs)] for n, _ in pack]
+        occ_names = {t[0] for t in occ_targets}
 
-        weights = [self.rng.uniform(0.6, 1.5) for _ in targets]
-        total_w = sum(weights) or 1.0
-        remaining = cap
-        for i, t in enumerate(targets):
-            add = min(int(cap * weights[i] / total_w), 90 - t[1], remaining)
-            add = max(0, add)
-            t[1] += add
-            remaining -= add
-        for t in targets:                      # 余数逐项填到刚好用完
-            if remaining <= 0:
-                break
-            add = min(90 - t[1], remaining)
-            t[1] += add
-            remaining -= add
+        # 信用评级：从职业点里出，落在区间内
+        lo, hi = b["credit"]
+        credit = self.rng.randint(min(lo + 10, hi), hi) if hi > lo else lo
+        occ_targets.append([chargen.CREDIT, credit])
+
+        extra_names = [n for n in ("侦查", "聆听", "急救", "潜行", "心理学",
+                                   "图书馆利用", "话术", "攀爬", "追踪")
+                       if n not in occ_names]
+        interest_targets: list[list] = []
+        for name in self.rng.sample(extra_names, k=min(2, len(extra_names))):
+            interest_targets.append([name, chargen.base_of(name, attrs)])
+
+        def _spend(items: list[list], points: int) -> int:
+            """按随机权重把 points 分下去，尊重 90 上限；返回没花完的余数。
+
+            信用评级不参与分配——它的值已经定在职业区间里了，
+            再往上加就出区间了（这个坑踩过一次：CR 被顶到 60，区间是 20-50）。
+            """
+            pool = [t for t in items if t[0] != chargen.CREDIT]
+            weights = [self.rng.uniform(0.6, 1.5) for _ in pool]
+            total_w = sum(weights) or 1.0
+            left = points
+            for i, t in enumerate(pool):
+                if left <= 0:
+                    break
+                add = max(0, min(int(points * weights[i] / total_w), 90 - t[1], left))
+                t[1] += add
+                left -= add
+            for t in pool:                      # 余数逐项填到刚好用完
+                if left <= 0:
+                    break
+                add = max(0, min(90 - t[1], left))
+                t[1] += add
+                left -= add
+            return left
+
+        # 信用评级是职业点里出的一笔，先从职业点扣掉，剩下的才给别人分配
+        leftover = _spend(occ_targets, max(0, b["occ"] - credit))
+        _spend(interest_targets + occ_targets, b["interest"] + leftover)
+
+        targets = occ_targets + interest_targets
 
         first = self.rng.choice(chargen.FIRST_NAMES)
         last = self.rng.choice(chargen.LAST_NAMES)
@@ -523,7 +556,7 @@ class MockClient(BaseClient):
             f"occupation: {occ}",
             f"age: {self.rng.randint(25, 52)}",
             f"gender: {self.rng.choice(['男', '女'])}",
-            f"credit: {self.rng.randint(20, 60)}",
+            f"credit: {credit}",
             "skills:",
         ]
         for nm, val in targets:
@@ -869,9 +902,13 @@ class MockClient(BaseClient):
         if self.rng.random() < 0.30:
             state_lines.append("openroll 1d6 那东西会不会动")
 
-        # 暗骰：只有守秘人和导演看得到
+        # 暗骰：只有守秘人和导演看得到。
+        # 这里刻意**不纯靠硬币**：第 1、3、5… 个守秘人回合一定掷暗骰，
+        # 其余回合有一半概率。Mock 是测试替身，不能有明显概率让自检随机挂掉
+        # （纯 0.5 的话，跑 3 轮有 12% 的概率一次都不掷，"暗骰不泄漏"那条就白测了）。
+        self._kp_plays = getattr(self, "_kp_plays", 0) + 1
         roll_block = ""
-        if self.rng.random() < 0.5:
+        if self._kp_plays % 2 == 1 or self.rng.random() < 0.5:
             roll_block = ("\n<roll>\n"
                           + self.rng.choice(["1d6 | 他会不会撒谎",
                                              "1d100 | 那个东西今晚会不会动",

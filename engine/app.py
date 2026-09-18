@@ -847,11 +847,24 @@ class App:
             st = (s.seats.get(sid) if s else None) or {}
             char = (st.get("character") if st else None) or seat.get("character") or {}
             attrs = (char or {}).get("attributes") or {}
+            prof = seat.get("profile") or {}
+            handle = prof.get("player_name") or seat.get("display_name") or sid
+            char_name = str((char or {}).get("name") or "").strip()
+            # 桌上怎么称呼这个座位：
+            #   车卡之前（还没有角色）→ 就是**玩家本人**，显示网名；
+            #   车出角色之后          → `角色名（网名）`，一眼看出谁在演谁。
+            # 名字是 AI 自己取的，引擎不预设（见 config.make_pl_seat）。
+            label = f"{char_name}（{handle}）" if char_name and handle != char_name \
+                else (char_name or handle)
             out.append({
                 "seat_id": sid,
                 "kind": seat.get("kind"),
-                "display_name": char.get("name") or seat.get("display_name"),
-                "player_name": (seat.get("profile") or {}).get("player_name", ""),
+                "label": label,
+                "has_character": bool(char_name),
+                # display_name 保留"角色名"的原意：提示词里、叙述里用的是它
+                "display_name": char_name or seat.get("display_name"),
+                "player_name": prof.get("player_name", ""),
+                "handle": prof.get("handle", ""),
                 "occupation": char.get("occupation", ""),
                 "model": seat.get("model", ""),
                 "provider": seat.get("provider", ""),

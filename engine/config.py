@@ -122,15 +122,21 @@ def make_pl_seat(index: int, entry: Any = None, preset_index: int | None = None)
 
     `entry` 是名册里的人（engine/roster.py）。**玩家身份是持久的**，
     所以 profile.player_id 指向名册 id —— 跨周目记忆跟着人走，不跟着座位走。
+
+    **刻意不预置角色。** 以前这里会塞一张现成的调查员卡，于是：
+      · 桌上从第一秒显示的就是一个引擎挑的角色名，而不是坐在这儿的那个玩家
+      · 车卡时提示词还说「守秘人给你预留的名字是「X」」——
+        那个名字是引擎随机给的，跟守秘人没关系，纯粹是编的
+    现在 `character` 是空的：角色由 AI 自己车，**名字也由它自己取**。
+    在它车出来之前，这个座位上坐的是玩家本人，显示的就是网名。
     """
     from . import roster as roster_mod
     person = entry or roster_mod.default_pl(index)
-    inv = chargen.preset(preset_index if preset_index is not None else index)
-    char = chargen.finalize(copy.deepcopy(inv))
     return {
         "seat_id": f"pl_{index + 1}",
         "kind": "PL",
-        "display_name": char["name"],       # 角色名；真人网名在 profile.player_name
+        # 车卡之前显示网名；车出角色之后由 PLAgent 换成「角色名（网名）」
+        "display_name": person.display(),
         "provider": "deepseek",
         "base_url": PROVIDERS["deepseek"]["base_url"],
         "api_key": "",
@@ -149,7 +155,7 @@ def make_pl_seat(index: int, entry: Any = None, preset_index: int | None = None)
             "personality_traits": list(person.traits),
             "habits": list(person.habits),
         },
-        "character": char,
+        "character": {},
     }
 
 
@@ -272,6 +278,9 @@ def default_config() -> dict[str, Any]:
             "pointbuy_max": 90,
             "age_adjust": True,        # 按规则书做年龄补正（EDU 增强检定等）
             "chargen_audit": True,     # 车卡后守秘人审卡（夹带东西会被逮住）
+            # 车卡违规时回炉重车几次（0 = 不回炉，直接由引擎裁剪到合规）。
+            # 只给一次就够：违规清单是具体的，能改的第一次就改了。
+            "chargen_retry": 1,
             "combat_by_dex": True,     # 战斗轮按 DEX 顺序而非同时行动
             "retrospective": True,     # 散场后让每个玩家复盘（跨周目记忆的生长点）
             "reveal_after_end": True,  # 结局后解禁模组原文给玩家看

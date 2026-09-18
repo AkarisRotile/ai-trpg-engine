@@ -745,12 +745,32 @@ class GameLoop:
                 continue
 
             char = res["character"]
+            violations = res.get("violations") or []
+            repairs = res.get("repairs") or []
             st.update({
                 "character": char, "chargen_warnings": res.get("warnings", []),
+                "chargen_violations": violations, "chargen_repairs": repairs,
+                "chargen_spent": res.get("spent"), "chargen_budget": res.get("budget"),
                 "chargen_raw": res.get("raw", ""), "chargen_ooc": res.get("ooc", ""),
                 "ready": True,
             })
+            # 角色先落地，后面所有事件才叫得出**角色名**（车卡阶段叫的是网名，
+            # 因为那会儿坐在这儿的确实是玩家本人——见 config.make_pl_seat）
             pl.adopt_character(char)
+            # 违规与修正都摆到台面上——车卡规范是硬的，但过程要看得见
+            for v in violations:
+                self._e("system", f"〔车卡违规〕{pl.display_name}：{v['detail']}",
+                        seat_id=pl.seat_id)
+            for note in repairs:
+                self._e("system", f"〔车卡修正〕{pl.display_name}：{note}",
+                        seat_id=pl.seat_id)
+            b = res.get("budget") or {}
+            if b:
+                self._e("system",
+                        f"〔车卡结算〕{pl.display_name}：技能点 {res.get('spent')}"
+                        f" / {b.get('total')}（职业 {b.get('occ')} + 兴趣 {b.get('interest')}，"
+                        f"公式 {b.get('formula')}）" + ("，已裁到合规" if repairs else "，合规"),
+                        seat_id=pl.seat_id)
             try:
                 pl.save_memory()
                 pl.card.save()       # 让这个人的文件夹在车卡阶段就建起来
