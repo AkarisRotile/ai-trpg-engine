@@ -570,19 +570,19 @@ def validate_sheet(sheet: dict[str, Any], attrs: dict[str, int],
 def allocate(sheet: dict[str, Any], attrs: dict[str, int],
              occupation: str | None = None) -> tuple[dict[str, Any], list[str],
                                                      dict[str, Any]]:
-    """把卡裁成合法，并且**算清每个技能的点数出自哪本账**。
+    """把 AI 想玩的技能**缩放到预算之内**，并算清每个点数出自哪本账。
 
-    为什么非要算这个：那张 Excel 卡自己就是个计算器——技能表的
-    「职业」列和「兴趣」列分开写，`人物卡!J50` 会当场显示
-    「剩余职业点=… 剩余兴趣点=…」。要是引擎只写个总数、或者一律
-    把本职技能的点全塞进职业列，那张卡一打开两本账就都不平，
-    用户看到的是"这程序算错了"。
+    这里最要紧的一件事：**超支在结构上不可能发生。**
 
-    规则：
-      1. 本职技能（含母语、信用评级）先用职业点付，职业点用完了剩下的走兴趣点
-      2. 非本职技能只能用兴趣点
-      3. 信用评级必须从职业点里出
-      4. 哪本账超了就削哪本，削到刚好用完；单项不低于基础值、不高于 90
+    以前是让 AI 直接输出"最终技能值"，还要求它自己把总数凑进预算——
+    而模型算加法非常不稳（实测超支 60~90 点是常态）。于是引擎只能事后
+    检测＋裁剪，把 AI 精心想的分配削成一堆没意义的小数字。
+
+    现在的契约反过来了：**AI 写的是"我想要多少"，引擎负责把它变成"能有多少"**。
+    两本账各自等比缩放（本职技能用职业点、其余用兴趣点），
+    缩放之后再按最大余数法补整，保证总数刚好落在预算内。
+    AI 的**相对意图**（哪个技能是主力、哪个只是点缀）完整保留，
+    它不需要做任何算术——这跟骰子和时间一样，本来就不该交给它。
 
     返回 (卡, 修正说明, 分配表)。分配表直接交给 sheet.write_sheet。
     """
@@ -590,28 +590,24 @@ def allocate(sheet: dict[str, Any], attrs: dict[str, int],
     b = budget_split(attrs, occ)
     fixes: list[str] = []
 
-    # ---- 1. 逐项夹到合法范围 ----
+    # ---- 1. 读 AI 的意向：数字或优先级词都行 ----
+    items = _skill_items(sheet)
     vals: dict[str, int] = {}
-    for name, value in _skill_items(sheet):
+    for name, value in items:
         if name == "克苏鲁神话":
-            if value != 0:
-                fixes.append(f"「{name}」{value} → 0（车卡阶段不分配神话技能）")
             vals[name] = 0
             continue
         base = base_of(name, attrs)
-        v = int(value)
-        if v < base:
-            fixes.append(f"「{name}」{v} → {base}（不得低于基础值）")
-            v = base
-        if v > SKILL_CAP:
-            fixes.append(f"「{name}」{v} → {SKILL_CAP}（超过车卡上限 {SKILL_CAP}）")
-            v = SKILL_CAP
-        vals[name] = v
+        vals[name] = max(base, min(int(value), SKILL_CAP))
     if not any(same_skill(n, "闪避") for n in vals):
         vals["闪避"] = base_of("闪避", attrs)
 
-    # ---- 2. 信用评级：夹进职业区间，最低吃 lo 点职业点 ----
+    # ---- 2. 信用评级：夹进职业区间，它固定吃职业点（不参与缩放）----
+    # 区间上界也要服从 90 上限：有些职业卡里写的是 0–99（比如表里没有的职业），
+    # 直接用就会冒出一个 99% 的信用评级，比车卡上限还高。
     lo, hi = b["credit"]
+    hi = min(int(hi), SKILL_CAP)
+    lo = min(int(lo), hi)
     cr_name = next((n for n in vals if same_skill(n, CREDIT)), CREDIT)
     raw_cr = vals.get(cr_name)
     if raw_cr is None:
@@ -620,49 +616,89 @@ def allocate(sheet: dict[str, Any], attrs: dict[str, int],
                 if sheet.get("credit") is not None else None
         except (TypeError, ValueError):
             raw_cr = None
-    if raw_cr is None:
-        raw_cr = lo
-        fixes.append(f"补上信用评级 {lo}（{occ or '本职'}的区间是 {lo}–{hi}，"
-                     f"点数从职业点里出）")
-    elif not (lo <= raw_cr <= hi):
-        fixed = min(max(int(raw_cr), lo), hi)
-        fixes.append(f"信用评级 {raw_cr} → {fixed}"
-                     f"（{occ or '本职'}的区间是 {lo}–{hi}）")
-        raw_cr = fixed
+    if raw_cr is None or not (lo <= int(raw_cr) <= hi):
+        want = lo if raw_cr is None else min(max(int(raw_cr), lo), hi)
+        if raw_cr is None:
+            fixes.append(f"补上信用评级 {want}（{occ or '本职'}的区间是 {lo}–{hi}）")
+        else:
+            fixes.append(f"信用评级 {raw_cr} → {want}"
+                         f"（{occ or '本职'}的区间是 {lo}–{hi}）")
+        raw_cr = want
     vals[cr_name] = int(raw_cr)
 
-    # ---- 3. 两本账分配 ----
     def is_occ_skill(name: str) -> bool:
         return _is_occupation_skill(name, b["occ_skills"]) \
             if b["known_occupation"] else True
 
-    # 信用评级和母语优先吃职业点，其余本职技能按名字序（结果稳定）
+    def want_of(name: str) -> int:
+        """这个技能希望投入多少点（不含基础值）。信用评级不参与缩放。"""
+        return max(0, vals[name] - base_of(name, attrs))
+
+    # ---- 3. 两本账各自缩放 ----
+    cr_want = want_of(cr_name)
+    occ_others = [n for n in vals if n != cr_name and is_occ_skill(n)]
+    others = [n for n in vals if n != cr_name and not is_occ_skill(n)]
+
+    occ_room = max(0, b["occ"] - cr_want)          # 扣掉 CR 之后还剩多少职业点
+    occ_demand = sum(want_of(n) for n in occ_others)
+    int_room = b["interest"]
+    int_demand = sum(want_of(n) for n in others)
+
+    def scale(names: list[str], demand: int, room: int) -> None:
+        if demand <= 0:
+            return
+        factor = min(1.0, room / demand)
+        if factor >= 1.0:
+            return
+        raw = {n: want_of(n) * factor for n in names}
+        got = _largest_remainder(raw, room)
+        for n in names:
+            base = base_of(n, attrs)
+            newv = base + got.get(n, 0)
+            if newv != vals[n]:
+                vals[n] = newv
+        fixes.append(f"{'职业' if names is occ_others else '兴趣'}点不够"
+                     f"（想要 {demand}，只有 {room}），已等比缩放到预算内")
+
+    scale(occ_others, occ_demand, occ_room)
+    scale(others, int_demand, int_room)
+
+    # 兴趣点还有富余的话，把被职业点挤下去的本职技能补回来（不超它原本的意愿）
+    left_int = int_room - sum(want_of(n) for n in others)
+    if left_int > 0 and occ_others:
+        short = sorted(occ_others, key=lambda n: -want_of(n))
+        for n in short:
+            if left_int <= 0:
+                break
+            room_n = min(SKILL_CAP, vals[n] + left_int) - vals[n]
+            if room_n > 0:
+                take = min(room_n, left_int)
+                vals[n] += take
+                left_int -= take
+
+    # ---- 4. 算清每个点出自哪本账 ----
     order = sorted(vals, key=lambda n: (0 if same_skill(n, CREDIT) else
                                         1 if same_skill(n, "母语") else 2, n))
     occ_left, int_left = b["occ"], b["interest"]
     plan: dict[str, dict[str, int]] = {}
     for name in order:
         base = base_of(name, attrs)
-        want = vals[name] - base
+        need = vals[name] - base
         o = i = 0
-        if is_occ_skill(name):
-            o = min(want, occ_left)
+        if is_occ_skill(name) or same_skill(name, CREDIT):
+            o = min(need, occ_left)
             occ_left -= o
-            want -= o
-        i = min(want, int_left)
+            need -= o
+        i = min(need, int_left)
         int_left -= i
-        want -= i
-        if want > 0:
-            # 两本账都掏空了：这个技能只能降下来
-            vals[name] -= want
-            fixes.append(f"预算不够，「{name}」再降 {want} → {vals[name]}")
+        need -= i
+        if need > 0:                    # 理论上到不了这儿
+            vals[name] -= need
+            fixes.append(f"预算不够，「{name}」再降 {need} → {vals[name]}")
         plan[name] = {"base": base, "occ": o, "interest": i}
 
     used_occ = sum(p["occ"] for p in plan.values())
     used_int = sum(p["interest"] for p in plan.values())
-    if used_occ or used_int:
-        fixes.append(f"两本账：职业点 {used_occ}/{b['occ']}，"
-                     f"兴趣点 {used_int}/{b['interest']}")
 
     out_sheet = dict(sheet)
     out_sheet["skills"] = {n: vals[n] for n in sorted(vals)}
@@ -678,8 +714,30 @@ def allocate(sheet: dict[str, Any], attrs: dict[str, int],
         "used_interest": used_int,
         "left_occ": b["occ"] - used_occ,
         "left_interest": b["interest"] - used_int,
+        "scaled": bool(occ_demand > occ_room or int_demand > int_room),
     }
     return out_sheet, fixes, report
+
+
+def _largest_remainder(weights: dict[str, float], total: int) -> dict[str, int]:
+    """把 total 点按权重切开，整数、和刚好等于 total（最大余数法）。
+
+    这么做是为了**确定性**：同样的输入必须得到同样的输出，
+    不能因为浮点误差每次开团分出来的点数都不一样。
+    """
+    if total <= 0 or not weights:
+        return {k: 0 for k in weights}
+    s = sum(weights.values())
+    if s <= 0:
+        return {k: 0 for k in weights}
+    exact = {k: v * total / s for k, v in weights.items()}
+    out = {k: int(v) for k, v in exact.items()}
+    short = total - sum(out.values())
+    if short > 0:
+        order = sorted(exact, key=lambda k: (-(exact[k] - int(exact[k])), k))
+        for k in order[:short]:
+            out[k] += 1
+    return out
 
 
 def repair_sheet(sheet: dict[str, Any], attrs: dict[str, int],

@@ -136,9 +136,11 @@ function addEntry(evt) {
 
   // 玩家的条目统一用引擎给的 label：车卡阶段是网名（坐在这儿的是玩家本人），
   // 车出角色之后是「角色名（网名）」。守秘人那边不动——它的条目写「守秘人」更有味道。
-  let who = evt.name || '';
+  // 变量刻意叫 whoName：下面几个分支里 who 是那个 <div class="who"> 元素，
+  // 撞名字的后果是页面上显示 [object HTMLDivElement]（踩过一次）。
+  let whoName = evt.name || '';
   const seat = ((S.state && S.state.seats) || []).find((s) => s.seat_id === evt.seat_id);
-  if (seat && seat.kind === 'PL' && seat.label && seat.has_character) who = seat.label;
+  if (seat && seat.kind === 'PL' && seat.label && seat.has_character) whoName = seat.label;
 
   if (type === 'scene') {
     node.textContent = `—— ${esc(evt.text)} ——`;
@@ -154,7 +156,7 @@ function addEntry(evt) {
       study_report: '的通读报告 · 只给你看',
       audit: (evt.meta && evt.meta.title) || '审卡',
     }[type];
-    who.appendChild(el('span', null, `${meta.icon} ${esc(who)} ${label}`));
+    who.appendChild(el('span', null, `${meta.icon} ${esc(whoName)} ${label}`));
     node.appendChild(who);
     if (type === 'audit' && evt.meta && evt.meta.rows) {
       const tbl = el('div', 'audit-rows');
@@ -204,7 +206,7 @@ function addEntry(evt) {
     }
   } else {
     const who = el('div', 'who');
-    const nameLabel = who ? `${esc(who)}` : '';
+    const nameLabel = whoName ? `${esc(whoName)}` : '';
     const seatTag = type === 'ooc' ? '桌边' : meta.label;
     who.appendChild(el('span', null, `${meta.icon} ${nameLabel}`));
     who.appendChild(el('span', 'tag', seatTag));

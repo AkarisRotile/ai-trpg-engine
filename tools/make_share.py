@@ -194,6 +194,18 @@ def main() -> int:
         print("  把来源清掉再重跑（一般是 data\\config.json 或某份日志）。")
         return 1
     print("密钥扫描：干净（没有 sk- / ghp_ / Bearer 之类的东西）")
+    # 泄漏哨兵：参考过的那份第三方预设禁止二创，包里一个字都不许有。
+    # （没放参考目录的人会直接跳过，不影响。）
+    try:
+        sys.path.insert(0, str(ROOT / "tools"))
+        import leak_sentinel                                   # noqa: PLC0415
+        if leak_sentinel.main() != 0:
+            print("\n⚠ 上面这些文件里混进了参考预设的原文，已停下。")
+            return 1
+    except SystemExit:
+        pass
+    except Exception as e:                                     # noqa: BLE001
+        print(f"（泄漏哨兵没跑成：{e}）")
     print("清场检查：干净")
 
     # 附一份源码里的读我.txt（如果成品目录里没有就让 build_exe.py 生成的那份留着）

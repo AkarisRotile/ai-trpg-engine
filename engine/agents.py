@@ -764,7 +764,9 @@ class PLAgent(BaseAgent):
         pc = (self.seat.get("character") or {}).get("name", "你的调查员")
         trial = list(self.messages) + [
             {"role": "user",
-             "content": prompts.build_anchoring_user(opening, pc, time_block)}
+             "content": prompts.build_anchoring_user(
+                 opening, pc, time_block,
+                 inner_voice=bool(self.options.get("deepseek_inner_voice", True)))}
         ]
         try:
             res = self._call(trial, phase="anchor")

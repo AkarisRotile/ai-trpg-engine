@@ -281,6 +281,13 @@ def default_config() -> dict[str, Any]:
             # 车卡违规时回炉重车几次（0 = 不回炉，直接由引擎裁剪到合规）。
             # 只给一次就够：违规清单是具体的，能改的第一次就改了。
             "chargen_retry": 1,
+            # DeepSeek V4 有一组放在**第一条 user 消息末尾**的控制标记
+            # （不是 system——社区文档说那个位置更稳）。
+            # 「角色沉浸要求」能让它的思考落在角色内心而不是冷分析，
+            # 正好对上我们要的 <think> 声部。官方没有正式文档，
+            # 社区实测有效、不支持时也只是被忽略，所以默认开着；
+            # 用别的模型/端点时它顶多多占几十个字。
+            "deepseek_inner_voice": True,
             "combat_by_dex": True,     # 战斗轮按 DEX 顺序而非同时行动
             "retrospective": True,     # 散场后让每个玩家复盘（跨周目记忆的生长点）
             "reveal_after_end": True,  # 结局后解禁模组原文给玩家看
