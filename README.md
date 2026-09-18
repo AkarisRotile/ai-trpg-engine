@@ -40,12 +40,15 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 3. 装 `requirements.txt` 里的依赖
 4. **跑一遍离线自检**——引擎有问题会在这里就拦下来，不会打个坏包给你
 5. 画图标（d20，纯几何算出来的，不是图片素材）
-6. PyInstaller 打包 → `dist\COC跑团引擎\COC跑团引擎.exe`
+6. PyInstaller 打包 → **`COC跑团引擎.exe`（直接装到项目根目录，双击就能找到）**
+   - 同目录会有一个 `_internal\`，那是程序自己的 DLL 和插件，**别删也别动**
+   - 加 `--portable` 可以让成品留在 `dist\` 下，方便整个文件夹压缩分享
 
 想跳过自检：`build.ps1 -SkipTests`；想从头重来：`build.ps1 -Clean`。
 
 > 首次构建要下 PyMuPDF（约 20 MB），慢一点是正常的。
-> 打完约 82 MB，因为里面带了 PDF 渲染和 Excel 读写。
+> 打完约 **81 MB**（exe 7.7 MB + `_internal` 73 MB），
+> 因为里面带了 PDF 渲染（扫描件 OCR）和 Excel 读写（角色卡）。
 
 ---
 

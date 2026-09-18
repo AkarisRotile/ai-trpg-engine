@@ -21,7 +21,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 APP_NAME = "COC跑团引擎"
-EXE = ROOT / "dist" / APP_NAME / f"{APP_NAME}.exe"
+# 默认装在项目根目录；也认 dist\ 下的老位置（--portable 打出来的）
+_CANDIDATES = [
+    ROOT / f"{APP_NAME}.exe",
+    ROOT / "dist" / APP_NAME / f"{APP_NAME}.exe",
+]
+EXE = next((p for p in _CANDIDATES if p.exists()), _CANDIDATES[0])
 
 
 def main() -> int:
@@ -29,7 +34,7 @@ def main() -> int:
         print(f"找不到 {EXE}\n请先运行 tools/build_exe.py")
         return 1
 
-    out = ROOT / "dist" / "_smoke_exe_result.json"
+    out = EXE.parent / "_smoke_exe_result.json"
     if out.exists():
         out.unlink()
 

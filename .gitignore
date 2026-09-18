@@ -23,6 +23,12 @@ build/
 dist/
 *.spec
 assets/_exe_icon_check.png
+assets/_exe_icon_big.png
+# 打包好之后装在根目录的那份程序
+COC跑团引擎.exe
+_internal/
+读我.txt
+_smoke_exe_result.json
 
 # ── 自检临时目录 ──
 .selftest/

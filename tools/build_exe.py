@@ -26,6 +26,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 APP_NAME = "COC跑团引擎"
 
+# 默认把成品装到项目根目录（双击就能找到）；
+# 加 --portable 则留在 dist\ 下，方便整个文件夹压缩分享。
+PORTABLE = False
+
 EXCLUDE = [
     "tkinter", "unittest", "pydoc", "doctest", "test",
     "numpy", "pandas", "matplotlib", "scipy",
@@ -57,6 +61,15 @@ HIDDEN = [
 
 
 def main() -> int:
+    global PORTABLE
+    import argparse
+    ap = argparse.ArgumentParser(description="打包成 exe")
+    ap.add_argument("--portable", action="store_true",
+                    help="成品留在 dist\\ 下（方便整个文件夹压缩分享），"
+                         "而不是装到项目根目录")
+    args = ap.parse_args()
+    PORTABLE = args.portable
+
     if not (ROOT / "main.py").exists():
         print("找不到 main.py")
         return 1
@@ -127,30 +140,63 @@ def main() -> int:
         print(f"没找到产物 {exe}")
         return 1
 
-    # 数据目录跟着 exe 走，预建空壳并附一份说明
-    data = out_dir / "data"
+    # ★ 装到项目根目录，双击就能找到，不用翻 dist\
+    #   onedir 的 exe 必须和 _internal 在一起，所以两个一起搬。
+    #   （exe 依赖 _internal 里的 DLL 和插件，少一个都起不来。）
+    if PORTABLE:
+        target_exe = exe
+        install_dir = out_dir
+        print(f"（--portable：成品留在 {out_dir}，方便整个文件夹压缩分享）")
+    else:
+        target_exe = ROOT / f"{APP_NAME}.exe"
+        install_dir = ROOT
+        internal_src = out_dir / "_internal"
+        internal_dst = ROOT / "_internal"
+        if internal_dst.exists():
+            shutil.rmtree(internal_dst, ignore_errors=True)
+        if internal_src.is_dir():
+            shutil.move(str(internal_src), str(internal_dst))
+        if target_exe.exists():
+            target_exe.unlink()
+        shutil.move(str(exe), str(target_exe))
+        shutil.rmtree(out_dir, ignore_errors=True)
+        try:
+            if dist.exists() and not any(dist.iterdir()):
+                dist.rmdir()
+        except OSError:
+            pass
+        print(f"已装到根目录：{target_exe}")
+
+    # 数据目录跟 exe 同级
+    data = install_dir / "data"
     for sub in ("modules", "memory", "players", "templates", "rules"):
         (data / sub).mkdir(parents=True, exist_ok=True)
     (data / "runtime" / "sessions").mkdir(parents=True, exist_ok=True)
 
-    # ★ 空白角色卡模板必须一起带上，否则打包版写不出 Excel 卡
+    # 空白角色卡模板必须一起带上，否则打包版写不出 Excel 卡
     tpl_src = ROOT / "data" / "templates" / "COC7空白卡.xlsx"
     if not tpl_src.exists():
         tpl_src = ROOT / "COC7空白卡CY22.4 Plus.xlsx"
+    tpl_dst = data / "templates" / "COC7空白卡.xlsx"
     if tpl_src.exists():
-        shutil.copyfile(tpl_src, data / "templates" / "COC7空白卡.xlsx")
-        print("已附带 COC7 空白角色卡模板")
+        if tpl_src.resolve() == tpl_dst.resolve():
+            print("已附带 COC7 空白角色卡模板（本来就在位）")
+        else:
+            shutil.copyfile(tpl_src, tpl_dst)
+            print("已附带 COC7 空白角色卡模板")
     else:
         print("⚠ 没找到空白角色卡模板，打包版将无法生成 Excel 角色卡")
 
     # 把演示模组一起带上，装好就能按开始
     demo_src = ROOT / "data" / "modules" / "demo_洋馆之夜"
-    if demo_src.is_dir():
-        shutil.copytree(demo_src, data / "modules" / "demo_洋馆之夜",
-                        dirs_exist_ok=True)
+    demo_dst = data / "modules" / "demo_洋馆之夜"
+    if demo_src.is_dir() and demo_src.resolve() != demo_dst.resolve():
+        shutil.copytree(demo_src, demo_dst, dirs_exist_ok=True)
         print("已附带演示模组：洋馆之夜")
+    elif demo_dst.is_dir():
+        print("已附带演示模组：洋馆之夜（本来就在位）")
 
-    (out_dir / "读我.txt").write_text(
+    (install_dir / "读我.txt").write_text(
         "AI 跑团引擎 · COC 第七版\n"
         "=" * 40 + "\n\n"
         "双击「" + APP_NAME + ".exe」启动。\n\n"
@@ -172,10 +218,22 @@ def main() -> int:
         "升级程序时只要不动 data\\ 就不会丢。\n",
         encoding="utf-8")
 
-    size = sum(f.stat().st_size for f in out_dir.rglob("*") if f.is_file())
-    print(f"\n产物：{exe}")
+    # 只统计"这个程序本身的体积"：exe + _internal。
+    # 装到根目录时不能整个 rglob 根目录——那会把 .venv 和源码都算进去。
+    if PORTABLE:
+        size = sum(f.stat().st_size for f in install_dir.rglob("*") if f.is_file())
+    else:
+        size = target_exe.stat().st_size
+        internal = install_dir / "_internal"
+        if internal.is_dir():
+            size += sum(f.stat().st_size for f in internal.rglob("*") if f.is_file())
+    print(f"\n产物：{target_exe}")
     print(f"体积：{size / 1024 / 1024:.1f} MB")
-    print("\n验证：双击上面的 exe，或用 tools/smoke_exe.py 做自动检查。")
+    if not PORTABLE:
+        print(f"\n双击这个就能玩：{target_exe}")
+        print(f"（同目录的 _internal\\ 是程序自己的东西，别删也别动；"
+              f"data\\ 是你的数据，升级时只要不动它就不会丢。）")
+    print("验证：双击上面的 exe，或用 tools/smoke_exe.py 做自动检查。")
     return 0
 
 

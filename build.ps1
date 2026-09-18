@@ -96,16 +96,23 @@ Say "6/6 打包"
 & $vpy (Join-Path $root 'tools\build_exe.py')
 if ($LASTEXITCODE -ne 0) { Bad "打包失败"; exit 1 }
 
-$exe = Join-Path $root 'dist\COC跑团引擎\COC跑团引擎.exe'
+$exe = Join-Path $root 'COC跑团引擎.exe'
 if (Test-Path $exe) {
-    $mb = [math]::Round((Get-ChildItem (Join-Path $root 'dist\COC跑团引擎') -Recurse -File |
-          Measure-Object -Property Length -Sum).Sum / 1MB, 1)
+    $size = 0
+    foreach ($p in @($exe, (Join-Path $root '_internal'))) {
+        if (Test-Path $p) {
+            $size += (Get-ChildItem $p -Recurse -File -ErrorAction SilentlyContinue |
+                      Measure-Object -Property Length -Sum).Sum
+        }
+    }
+    $mb = [math]::Round($size / 1MB, 1)
     Write-Host ""
     Write-Host "打包完成" -ForegroundColor Green
-    Write-Host "  双击这个： $exe"
-    Write-Host "  整个文件夹一起拷走才能用，体积约 $mb MB"
+    Write-Host "  双击这个就能玩： $exe"
+    Write-Host "  体积约 $mb MB"
     Write-Host ""
-    Write-Host "  只想要一个干净的空环境（不带演示数据），可以先删掉 data 目录再运行。" -ForegroundColor DarkGray
+    Write-Host "  同目录的 _internal\ 是程序自己的东西，别删也别动。" -ForegroundColor DarkGray
+    Write-Host "  data\ 是你的数据（配置、模组、存档、记忆），升级时只要不动它就不会丢。" -ForegroundColor DarkGray
 } else {
     Bad "没找到 exe，打包可能出问题了"
     exit 1
