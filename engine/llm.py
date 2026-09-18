@@ -890,3 +890,62 @@ def probe_seat(seat: dict[str, Any]) -> tuple[bool, str]:
     except LLMError as e:
         return False, e.message
     return client.probe()
+
+
+# ══════════════════════════════════════════════════════════════ 拉取模型列表
+
+def fetch_models(base_url: str, api_key: str = "",
+                 timeout: int = 20) -> dict[str, Any]:
+    """从这个端点拉取它支持的模型列表（GET {base}/models）。
+
+    为什么需要它：模型名是最容易填错的一栏——新出的型号名字又长又怪
+    （`deepseek-v4f` 这种），手打一次就可能打错一个字符，
+    然后得到一句莫名其妙的 400。拉列表就没这个问题：点着选。
+
+    任何 OpenAI 兼容端点都应该有 `/models`；没有的话会明确告诉你。
+    """
+    url = (base_url or "").strip().rstrip("/")
+    if not url:
+        return {"ok": False, "message": "先填 Base URL。"}
+    if url.endswith("/chat/completions"):
+        url = url[: -len("/chat/completions")]
+    if not url.endswith("/models"):
+        url += "/models"
+
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        resp = requests.get(url, headers=headers, timeout=timeout)
+    except requests.exceptions.SSLError as e:
+        return {"ok": False, "message": f"TLS 握手失败，连不上 {url}。\n{e}"}
+    except requests.exceptions.ConnectTimeout:
+        return {"ok": False, "message": f"连接 {url} 超时（{timeout} 秒）。检查一下网络和地址。"}
+    except requests.exceptions.RequestException as e:
+        return {"ok": False, "message": f"连不上 {url}：{type(e).__name__}: {e}"}
+
+    if resp.status_code != 200:
+        return {"ok": False, "url": url,
+                "message": _friendly_error(resp.status_code, resp.text)}
+
+    try:
+        data = resp.json()
+    except ValueError:
+        return {"ok": False, "url": url,
+                "message": f"{url} 返回的不是 JSON——这个端点可能不支持 /models，手动填模型名吧。"}
+
+    items = data.get("data") if isinstance(data, dict) else data
+    ids: list[str] = []
+    if isinstance(items, list):
+        for it in items:
+            if isinstance(it, dict):
+                mid = it.get("id") or it.get("name") or it.get("model")
+                if mid:
+                    ids.append(str(mid))
+            elif isinstance(it, str):
+                ids.append(it)
+    ids = sorted(set(ids))
+    if not ids:
+        return {"ok": False, "url": url,
+                "message": "接口有响应，但里面没有模型名。可能这个端点不支持 /models，手动填吧。"}
+    return {"ok": True, "models": ids, "count": len(ids), "url": url}

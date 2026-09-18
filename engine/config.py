@@ -393,6 +393,39 @@ def mask_key(key: str) -> str:
     return f"{key[:6]}{'•' * 6}{key[-4:]}"
 
 
+# ---------------------------------------------------------------- 模型名缓存
+
+def norm_base(url: str) -> str:
+    """归一化 Base URL，用作缓存键（大小写、末尾斜杠、/chat/completions 都不算数）。"""
+    u = (url or "").strip().rstrip("/").lower()
+    if u.endswith("/chat/completions"):
+        u = u[: -len("/chat/completions")]
+    return u
+
+
+def remember_models(cfg: dict[str, Any], base_url: str, models: list[str]) -> None:
+    """记住某个端点拉到过的模型名。
+
+    模型名是最难记的一栏（`DeepSeek-V4-Flash-Vision-Exp` 这种），
+    拉过一次就存下来，下次断网、或者端点暂时抽风，也照样能点着选。
+    """
+    key = norm_base(base_url)
+    models = [m for m in (models or []) if m]
+    if not key or not models:
+        return
+    ui = cfg.setdefault("ui", {})
+    cache = ui.setdefault("model_cache", {})
+    old = [m for m in (cache.get(key) or []) if m not in models]
+    cache[key] = (list(models) + old)[:120]
+    while len(cache) > 20:                     # 别让缓存无限长大
+        cache.pop(next(iter(cache)), None)
+
+
+def cached_models(cfg: dict[str, Any], base_url: str) -> list[str]:
+    return [str(m) for m in
+            ((cfg.get("ui") or {}).get("model_cache", {}).get(norm_base(base_url)) or [])]
+
+
 def seats(cfg: dict[str, Any], kind: str | None = None) -> list[dict[str, Any]]:
     out = [s for s in cfg.get("seats", []) if s.get("enabled", True)]
     if kind:

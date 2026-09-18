@@ -772,7 +772,31 @@ function buildSeatEditor(seat, idx) {
   mk('Base URL', 'base_url', seat.base_url || '', {
     span2: true, placeholder: 'https://api.deepseek.com/v1',
   });
-  mk('模型', 'model', seat.model || '', { placeholder: 'deepseek-chat' });
+  const modelInput = mk('模型', 'model', seat.model || '', { placeholder: 'deepseek-chat' });
+  // 模型名最容易填错，给一个"拉列表"的按钮，点着选
+  const modelField = modelInput.parentElement;
+  // 上次拉到过的先摆上（不用联网），拉取按钮再刷新一遍
+  const cached = cachedModels(seat.base_url || '');
+  if (cached.length) installModelList(modelField, modelInput, cached);
+  const fetchBtn = el('button', 'btn tiny', '🔍 拉取模型列表');
+  fetchBtn.style.marginTop = '4px';
+  fetchBtn.onclick = async () => {
+    fetchBtn.disabled = true;
+    fetchBtn.textContent = '拉取中…';
+    try {
+      await saveConfig(true);        // 先把刚填的地址和 Key 存下去，服务端才知道用哪个
+      const r = await call('fetch_models', seat.seat_id);
+      if (!r.ok) { toast(r.message, 'err'); return; }
+      installModelList(modelField, modelInput, r.models);
+      toast(`拉到 ${r.count} 个模型，点输入框就能选`, 'ok');
+    } catch (e) {
+      toast('拉取失败：' + e.message, 'err');
+    } finally {
+      fetchBtn.disabled = false;
+      fetchBtn.textContent = '🔍 拉取模型列表';
+    }
+  };
+  modelField.appendChild(fetchBtn);
   mk('API Key' + (seat.api_key_set ? '（已保存，留空即不修改）' : ''), 'api_key',
     seat.api_key || '', { type: 'password', span2: true, placeholder: 'sk-...' });
 
@@ -800,6 +824,33 @@ function buildSeatEditor(seat, idx) {
 
   box.appendChild(g);
   return box;
+}
+
+/** 从配置里读某个端点缓存过的模型名。 */
+function cachedModels(baseUrl) {
+  const key = (baseUrl || '').trim().replace(/\/+$/, '').toLowerCase()
+    .replace(/\/chat\/completions$/, '');
+  const cache = (S.cfg && S.cfg.ui && S.cfg.ui.model_cache) || {};
+  return cache[key] || [];
+}
+
+/** 把拉到的模型列表挂到输入框上（datalist：既能选也能自己填）。 */
+function installModelList(field, input, models) {
+  let list = field.querySelector('datalist');
+  if (!list) {
+    list = el('datalist');
+    list.id = 'models-' + Math.random().toString(36).slice(2, 8);
+    field.appendChild(list);
+    input.setAttribute('list', list.id);
+  }
+  list.innerHTML = '';
+  (models || []).forEach((m) => {
+    const o = el('option');
+    o.value = m;
+    list.appendChild(o);
+  });
+  if (!input.value && models && models.length) input.value = models[0];
+  input.placeholder = `共 ${models.length} 个可点选`;
 }
 
 function updateModelList(box, providerId) {
@@ -1612,6 +1663,27 @@ function bind() {
       `${r.name}：${r.pages} 页，采样页平均 ${Math.round(r.avg_chars)} 字 → ` +
       (r.needs_ocr ? '扫描型，需要 OCR' : '文本型，直接当模组用就行');
     toast(r.needs_ocr ? '这是扫描件，要 OCR' : '这是文本型 PDF，不用 OCR', 'ok');
+  };
+  $('btnVisModels').onclick = async () => {
+    const base = $('visBase').value.trim();
+    if (!base) { toast('先填视觉模型的 Base URL', 'err'); return; }
+    const btn = $('btnVisModels');
+    btn.disabled = true; btn.textContent = '拉取中…';
+    try {
+      // 先存一次，服务端拿得到 Key
+      await call('save_vision_settings', {
+        base_url: base, model: $('visModel').value.trim(),
+        api_key: $('visKey').value, dpi: Number($('visDpi').value) || 150,
+      });
+      const r = await call('fetch_models', '', base, $('visKey').value);
+      if (!r.ok) { toast(r.message, 'err'); return; }
+      installModelList($('visModel').parentElement, $('visModel'), r.models);
+      toast(`拉到 ${r.count} 个模型`, 'ok');
+    } catch (e) {
+      toast('拉取失败：' + e.message, 'err');
+    } finally {
+      btn.disabled = false; btn.textContent = '🔍 拉取';
+    }
   };
   $('btnSaveVision').onclick = async () => {
     const key = $('visKey').value;

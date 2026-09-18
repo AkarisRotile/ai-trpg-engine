@@ -241,6 +241,34 @@ class App:
 
     # ══════════════════════════════════════════════ 连接测试
 
+    def fetch_models(self, seat_id: str = "", base_url: str = "",
+                     api_key: str = "") -> dict[str, Any]:
+        """拉取模型列表，省得手打模型名。
+
+        给 seat_id 就用那个座位已经保存好的地址和 Key；
+        也可以直接给 base_url / api_key（OCR 那个视觉模型面板就是这么用的）。
+        """
+        from .llm import fetch_models as _fetch
+        label = ""
+        if seat_id:
+            seat = cfgmod.find_seat(self.cfg, seat_id)
+            if not seat:
+                return {"ok": False, "message": "找不到这个座位。"}
+            base_url = seat.get("base_url", "")
+            api_key = seat.get("api_key", "")
+            label = seat.get("display_name") or seat_id
+        if not (api_key or "").strip() and not base_url:
+            return {"ok": False, "message": "先填 Base URL 和 API Key（填完点一下保存）。"}
+        res = _fetch(base_url, api_key)
+        if res.get("ok"):
+            cfgmod.remember_models(self.cfg, base_url, res["models"])
+            cfgmod.save_config(self.cfg)
+            self._sys(f"〔模型列表〕{label or base_url} 拉到 {res['count']} 个模型"
+                      f"（已记下来，下次直接点选）。")
+        else:
+            self._sys(f"〔模型列表〕拉取失败：{res.get('message', '')[:120]}")
+        return res
+
     def probe(self, seat_id: str) -> dict[str, Any]:
         seat = cfgmod.find_seat(self.cfg, seat_id)
         if not seat:

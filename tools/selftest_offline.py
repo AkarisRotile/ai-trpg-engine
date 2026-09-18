@@ -203,6 +203,56 @@ def main() -> int:
     check(len(_ppo(sample).rolls) == 2, "整段输出里的 <roll> 能被抽取",
           str(_ppo(sample).rolls))
 
+    # ══════════════════════════════════════════ 1c. 拉取模型列表
+    print("\n【1c】拉取模型列表（/models）")
+    import http.server as _http
+    import json as _json
+    import threading as _thr
+    from engine.llm import fetch_models
+
+    class _ModelsHandler(_http.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            if self.path.rstrip("/").endswith("/models"):
+                body = _json.dumps({"object": "list", "data": [
+                    {"id": "deepseek-chat"},
+                    {"id": "deepseek-reasoner"},
+                    {"id": "deepseek-v4f"},
+                ]}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_error(404)
+
+        def log_message(self, *a):  # 别刷屏
+            pass
+
+    srv = None
+    try:
+        srv = _http.HTTPServer(("127.0.0.1", 0), _ModelsHandler)
+        port = srv.server_address[1]
+        _thr.Thread(target=srv.serve_forever, daemon=True).start()
+        r = fetch_models(f"http://127.0.0.1:{port}/v1", "sk-test")
+        check(bool(r.get("ok")) and "deepseek-v4f" in (r.get("models") or []),
+              "能从 /models 拉到模型列表（不用手打模型名）",
+              f"{r.get('count')} 个：{'、'.join((r.get('models') or [])[:4])}")
+        r2 = fetch_models(f"http://127.0.0.1:{port}/v1/chat/completions", "")
+        check(bool(r2.get("ok")),
+              "Base URL 填成 /chat/completions 也能自动纠正", r2.get("url", ""))
+        bad = fetch_models("http://127.0.0.1:9/v1", "sk-x")
+        check(not bad.get("ok") and bool(bad.get("message")),
+              "连不上时给出人话错误", (bad.get("message") or "")[:70])
+        empty = fetch_models("", "")
+        check(not empty.get("ok") and "Base URL" in (empty.get("message") or ""),
+              "没填地址时给出明确提示")
+    except OSError as e:
+        warn(False, "本机起不了测试用 HTTP 服务，跳过模型列表测试", str(e)[:60])
+    finally:
+        if srv is not None:
+            srv.shutdown()
+
     # ══════════════════════════════════════════ 1. 建会话 + 车卡
     print("\n【2】建立会话与车卡（属性由引擎掷，AI 自己车）")
     ev: list[dict] = []
