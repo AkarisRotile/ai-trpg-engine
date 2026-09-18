@@ -137,6 +137,16 @@
       <h4 class="section-h">全局选项</h4>
       <div id="optionEditors" class="option-grid"></div>
       <p class="hint" id="costHint"></p>
+
+      <details class="errlog" id="errLogBox">
+        <summary>🩺 最近出错（连不上、模型名不对、界面崩了，都在这儿）</summary>
+        <div class="row-actions">
+          <button class="btn tiny" id="btnRefreshErrors">↻ 刷新</button>
+          <button class="btn tiny" id="btnClearErrors">清空</button>
+          <span class="hint" id="errLogPath"></span>
+        </div>
+        <pre id="errLogBody">（还没刷新）</pre>
+      </details>
     </div>
     <footer class="modal-foot">
       <button class="btn ghost" id="btnResetConfig">恢复默认</button>

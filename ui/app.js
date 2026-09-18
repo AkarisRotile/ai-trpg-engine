@@ -62,6 +62,27 @@ function bridgeReady() {
   return !!(window.pywebview && window.pywebview.api);
 }
 
+// 界面自己崩了也要留下记录：打包成 exe 之后没有控制台，
+// 报错提示条一关就没了，用户说"报错了"的时候谁也查不到。
+let _errSent = 0;
+function reportClientError(message, detail) {
+  try {
+    if (!bridgeReady() || _errSent > 24) return;
+    _errSent += 1;
+    const fn = window.pywebview.api.log_client_error;
+    if (typeof fn === 'function') fn(String(message || ''), String(detail || ''));
+  } catch (e) { /* 记不上就算了，绝不能因为记日志再崩一次 */ }
+}
+window.addEventListener('error', (e) => {
+  reportClientError(e.message || 'error',
+    `${(e.filename || '')}:${e.lineno || 0}:${e.colno || 0}\n${(e.error && e.error.stack) || ''}`);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  const r = e.reason;
+  reportClientError((r && r.message) || String(r || 'unhandledrejection'),
+    (r && r.stack) || '');
+});
+
 async function call(method, ...args) {
   if (!bridgeReady()) throw new Error('界面桥接还没就绪，请稍等一秒再试。');
   const fn = window.pywebview.api[method];
@@ -956,9 +977,16 @@ function collectConfig() {
   const cfg = JSON.parse(JSON.stringify(S.cfg));
   const seats = [];
 
-  document.querySelectorAll('.seat-editor').forEach((box) => {
+  // ★ 必须限定在设置面板里（#seatEditors）。
+  //   「名册与站位」用的是同一套 .seat-editor 样式，一旦打开过，
+  //   那些节点就一直留在 DOM 里；这里要是用全局选择器，
+  //   名册那边的盒子没有 [data-k="provider"]，取 .dataset 会直接抛异常——
+  //   于是「保存设置」和「拉取模型列表」一起失效，填好的 Key 也存不进去。
+  document.querySelectorAll('#seatEditors .seat-editor').forEach((box) => {
+    const provBox = box.querySelector('[data-k="provider"]');
+    if (!provBox) return;
     const orig = (S.cfg.seats || []).find(
-      (x) => x.seat_id === box.querySelector('[data-k="provider"]').dataset.seat);
+      (x) => x.seat_id === provBox.dataset.seat);
     if (!orig) return;
     const seat = JSON.parse(JSON.stringify(orig));
     box.querySelectorAll('[data-k]').forEach((inp) => {
@@ -1012,6 +1040,19 @@ async function saveConfig(silent) {
   renderSettings();
   await refreshState();
   return saved;
+}
+
+/* ══════════════════════════ 出错记录 ══════════════════════════ */
+
+async function refreshErrors() {
+  try {
+    const r = await call('recent_errors', 40);
+    $('errLogPath').textContent = r.path || '';
+    const body = (r.tail || '').trim();
+    $('errLogBody').textContent = body || '（干净，没出过错）';
+  } catch (e) {
+    $('errLogBody').textContent = '读不到出错记录：' + e.message;
+  }
 }
 
 /* ══════════════════════════ 名册与站位 ══════════════════════════ */
@@ -1585,8 +1626,7 @@ function bind() {
     renderStudyPicker();
     await syncStudyRoom();
   };
-  $('btnStudyAsk').onclick = askStudy;
-  $('studyAskInput').onkeydown = (e) => { if (e.key === 'Enter') askStudy(); };
+  $('btnStudyAsk').onclick = askStudy;  $('studyAskInput').onkeydown = (e) => { if (e.key === 'Enter') askStudy(); };
   $('btnStudyToGame').onclick = async () => {
     const id = $('studyModuleSel').value;
     if (!id) { toast('先挑一个模组', 'err'); return; }
@@ -1637,9 +1677,24 @@ function bind() {
   $('btnDirector').onclick = sendDirector;
   $('directorInput').onkeydown = (e) => { if (e.key === 'Enter') sendDirector(); };
 
+  // 出错记录
+  $('btnRefreshErrors').onclick = () => refreshErrors();
+  $('btnClearErrors').onclick = async () => {
+    if (!confirm('清空出错记录？')) return;
+    await call('clear_errors');
+    refreshErrors();
+    toast('已清空', 'ok');
+  };
+  $('errLogBox').addEventListener('toggle', (e) => {
+    if (e.target.open) refreshErrors();
+  });
+
   // 设置
   $('btnSaveConfig').onclick = async () => {
-    try { await saveConfig(false); } catch (e) { toast('保存失败：' + e.message, 'err'); }
+    try { await saveConfig(false); } catch (e) {
+      reportClientError('保存设置失败', e && e.stack);
+      toast('保存失败：' + e.message, 'err');
+    }
   };
   $('btnResetConfig').onclick = async () => {
     if (!confirm('恢复默认设置？会覆盖所有席位配置。')) return;
@@ -1656,7 +1711,7 @@ function bind() {
   };
   $('btnFillDeepseek').onclick = () => {
     let hit = 0;
-    document.querySelectorAll('.seat-editor').forEach((box) => {
+    document.querySelectorAll('#seatEditors .seat-editor').forEach((box) => {
       const prov = box.querySelector('[data-k="provider"]');
       const base = box.querySelector('[data-k="base_url"]');
       const model = box.querySelector('[data-k="model"]');
@@ -1951,6 +2006,11 @@ async function boot() {
     if (!S.cfg.seats || !S.cfg.seats.length) {
       toast('还没有配置席位，先打开「设置」。', 'err');
     } else {
+      // 上次运行出过错就把话说出来，别让人对着一个不动的界面猜
+      if ((b.errors || []).length) {
+        toast(`上次运行记下 ${b.errors.length} 条出错，`
+              + `「设置 → 🩺 最近出错」里能看到全部`, 'err');
+      }
       const missing = (S.cfg.seats || []).filter(
         (s) => s.enabled !== false && (s.provider === 'deepseek' || s.provider === 'custom')
           && !s.api_key_set);

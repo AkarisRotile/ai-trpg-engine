@@ -192,8 +192,12 @@ def main() -> int:
         threading.Thread(target=probe, daemon=True).start()
 
     try:
-        webview.start(_runner, http_server=True, debug=debug,
-                      private_mode=False, storage_path=str(cfgmod.data_root() / ".webview"))
+        # private_mode=True：浏览器不落任何缓存。
+        # 界面是跟着 exe 一起换的，缓存只会带来一个后果——
+        # 换了新版本，窗口里跑的却还是上一版的 index.html / app.js，
+        # 而且因为磁盘上的文件其实已经是新的，怎么排查都排查不出来。
+        # 这个程序不用 localStorage（状态全在 data\ 里），所以这么做没有代价。
+        webview.start(_runner, http_server=True, debug=debug, private_mode=True)
     except TypeError:
         # 老版本 pywebview 不支持某些参数
         webview.start(http_server=True, debug=debug)

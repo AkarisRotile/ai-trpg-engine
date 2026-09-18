@@ -62,6 +62,7 @@ HIDDEN = [
     "engine.module_lib", "engine.linter", "engine.llm", "engine.config",
     "engine.spoiler", "engine.roster", "engine.sheet", "engine.ocr",
     "engine.docread", "engine.study", "engine.uicache", "engine.clock",
+    "engine.errlog",
 ]
 
 

@@ -22,6 +22,7 @@ from typing import Any, Callable
 
 from . import chargen, config as cfgmod, glossary, module_lib, player_memory
 from . import rules as rules_mod
+from . import errlog
 from .llm import LLMError, probe_seat
 from .session import Session
 from .turns import GameLoop
@@ -50,6 +51,25 @@ class App:
 
     def _emit(self, evt: dict[str, Any]) -> None:
         self._events.put(evt)
+
+    # ══════════════════════════════════════════════ 出错记录
+
+    def log_client_error(self, message: str, detail: str = "") -> dict[str, Any]:
+        """界面自己崩了也要留个记录。
+
+        不然就是现在这样：用户说"报错了"，我翻遍 data\\ 只有一份 session.json，
+        什么线索都没有。
+        """
+        errlog.log("界面", message, detail)
+        return {"ok": True}
+
+    def recent_errors(self, n: int = 30) -> dict[str, Any]:
+        return {"items": errlog.recent(n), "path": str(errlog.log_path()),
+                "tail": errlog.tail(160)}
+
+    def clear_errors(self) -> dict[str, Any]:
+        errlog.clear()
+        return {"ok": True}
 
     def poll_events(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -91,6 +111,8 @@ class App:
                 fn()
             except Exception as e:  # noqa: BLE001
                 self.last_job_error = f"{type(e).__name__}: {e}"
+                errlog.log(f"后台任务/{label or 'job'}", self.last_job_error,
+                           traceback.format_exc())
                 self._sys(f"任务出错：{self.last_job_error}")
                 traceback.print_exc()
             finally:
@@ -112,6 +134,7 @@ class App:
         return {
             "config": cfgmod.public_config(self.cfg),
             "modules": module_lib.scan_modules(),
+            "errors": errlog.recent(10),
             "sessions": Session.list_sessions()[:50],
             "players": player_memory.list_player_cards(),
             "roster": self.get_roster(),
@@ -269,6 +292,8 @@ class App:
             self._sys(f"〔模型列表〕{label or base_url} 拉到 {res['count']} 个模型"
                       f"（已记下来，下次直接点选）。")
         else:
+            errlog.log(f"拉取模型列表/{label or base_url}",
+                       str(res.get("message", "")), f"base_url={base_url}")
             self._sys(f"〔模型列表〕拉取失败：{res.get('message', '')[:120]}")
         return res
 
@@ -277,6 +302,10 @@ class App:
         if not seat:
             return {"ok": False, "message": "找不到这个座位。"}
         ok, msg = probe_seat(seat)
+        if not ok:
+            errlog.log(f"连接测试/{seat.get('display_name', seat_id)}", msg,
+                       f"base_url={seat.get('base_url', '')} "
+                       f"model={seat.get('model', '')}")
         self._sys(f"〔连接测试〕{seat.get('display_name', seat_id)}：{msg}")
         return {"ok": ok, "message": msg}
 

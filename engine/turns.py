@@ -85,6 +85,8 @@ class GameLoop:
         self._public_dice: list[str] = []
         # 桌上的钟：模型自己算日子一定会把什么都叫"昨天"，所以引擎替它算
         self._clock_dirty = False
+        # 桌边插话轮里"这次轮到谁接话"的游标（免得每次都点同一个人）
+        self._tt_cursor = 0
         if session.clock is None:
             session.clock = clock_mod.resolve_start(module, self.options)
 
@@ -1145,6 +1147,7 @@ class GameLoop:
                 [o for o in self._round_publics if o.get("tt")]
 
             targets: list[tuple[PLAgent, str]] = []
+            named: set[str] = set()
             for pl in self.pls:
                 if pl.seat_id not in by_seat:
                     continue
@@ -1157,7 +1160,26 @@ class GameLoop:
                     ooc = other.get("ooc") or ""
                     if any(n and n in ooc for n in names):
                         targets.append((pl, other["player_name"] or other["display_name"]))
+                        named.add(pl.seat_id)
                         break
+
+            # 没人被点名也不该就这么冷场。
+            # 真桌上，A 说一句「这门是从外面锁的」，B 就算没被叫到也会接一句。
+            # 以前这里只在"被点名"时才说话，于是大家各说各的、一轮下来零来回——
+            # 那正是"桌边感"最要紧的那部分。现在按顺序轮着补一两个人上来接话。
+            if not targets:
+                quiet = [pl for pl in self.pls
+                         if pl.seat_id in by_seat and pl.seat_id not in named]
+                if not quiet:
+                    return
+                want = 2 if exchange == 0 else 1
+                want = max(1, min(int(self.options.get("table_talk_fallback", want)), want,
+                                  len(quiet)))
+                start = self._tt_cursor % len(quiet)
+                for k in range(want):
+                    targets.append((quiet[(start + k) % len(quiet)], ""))
+                self._tt_cursor = start + want
+
             if not targets:
                 return
 

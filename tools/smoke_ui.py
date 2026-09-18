@@ -183,6 +183,35 @@ def probe(window) -> None:
               "研读室有「读一遍 / 重读 / 追问」三个按钮")
         js("document.querySelector('#modalStudy [data-close]').click()")
 
+        # ── 回归：名册的 .seat-editor 与设置面板同名 ──
+        # collectConfig() 以前用全局选择器扫 .seat-editor，而 boot() 里就已经
+        # 渲染过名册（7 个同名节点，没有 [data-k="provider"]），于是取 .dataset
+        # 直接抛异常 —— 表现是「保存设置」和「🔍 拉取模型列表」必失败，
+        # 填好的 API Key 一个字也存不进去。
+        js("document.querySelector('[data-modal=\"modalRoster\"]').click()")
+        time.sleep(1.5)
+        js("document.querySelector('#modalRoster [data-close]').click()")
+        js("document.querySelector('[data-modal=\"modalSettings\"]').click()")
+        time.sleep(1.5)
+        n_boxes = js("document.querySelectorAll('.seat-editor').length")
+        collected = js("(function(){try{var c=collectConfig();"
+                       "return 'ok:'+((c.seats||[]).length);}"
+                       "catch(e){return 'ERR:'+e.message+' @ '+(e.stack||'');}})()")
+        check(str(collected).startswith("ok:"),
+              "「保存设置 / 拉取模型」不会被名册的同名样式带崩",
+              f"DOM 里 {n_boxes} 个 .seat-editor（含名册那些），collectConfig → {collected}")
+
+        # ── 出错记录面板 ──
+        check(bool(js("typeof window.pywebview.api.log_client_error === 'function'"
+                      " && typeof window.pywebview.api.recent_errors === 'function'")),
+              "界面的报错能被记到文件里（log_client_error / recent_errors）")
+        js("document.getElementById('errLogBox').open = true")
+        js("document.getElementById('btnRefreshErrors').click()")
+        time.sleep(1.2)
+        body = js("document.getElementById('errLogBody').textContent") or ""
+        check(bool(body.strip()), "设置里有「最近出错」面板且能读出内容",
+              body.replace("\n", " ")[:70])
+
         bg = js("getComputedStyle(document.body).backgroundColor")
         check(bg not in (None, '', 'rgba(0, 0, 0, 0)'), "样式表已加载", str(bg))
 
@@ -202,14 +231,12 @@ def main() -> int:
         print(f"找不到 {index}")
         return 1
 
-    # 每次冒烟都用全新的浏览器用户目录，并且先按指纹清一次缓存：
-    # pywebview 会把 index.html / app.js 缓存起来，用老 profile 测出来的
-    # 其实是上一版的界面（这个坑踩过一次）。
+    # 用 private_mode=True：浏览器不留任何缓存，每次拿到的都是磁盘上这一版界面。
+    # （之前用常驻 profile，结果测出来的是上一版的 index.html / app.js，
+    #   白排查了一轮"为什么改动没生效"。）
+    # clear_if_stale 仍然留着，它管的是真机那条 private_mode=False 的路径。
     from engine.uicache import clear_if_stale
     clear_if_stale(index, cfgmod.data_root())
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    profile = cfgmod.data_root() / ".webview-smoke" / stamp
-    profile.mkdir(parents=True, exist_ok=True)
 
     window = webview.create_window(
         "界面冒烟测试", url=str(index), js_api=app,
@@ -217,8 +244,7 @@ def main() -> int:
     )
     webview.start(
         lambda: threading.Thread(target=probe, args=(window,), daemon=True).start(),
-        http_server=True, private_mode=False,
-        storage_path=str(profile))
+        http_server=True, private_mode=True)
 
     print("\n" + "=" * 62)
     failed = [r for r in RESULTS if not r[0]]

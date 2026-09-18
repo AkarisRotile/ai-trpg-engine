@@ -856,8 +856,40 @@ def main() -> int:
             san1 = (pl.seat.get("character") or {}).get("attributes", {}).get("SAN", 0)
             check(san1 <= san0, "守秘人能要求理智检定", f"SAN {san0} → {san1}")
 
-    # ══════════════════════════════════════════ 13. 乱格式模组 + 单人研读室
-    print("\n【13】乱格式模组解析 + 只有导演和 KP 的研读室")
+    # ══════════════════════════════════════════ 13. 出错记录
+    print("\n【13】出错记录（出事了得留得下证据）")
+    from engine import errlog
+
+    errlog.clear()
+    # Key 绝不能落盘——错误信息里很可能带着 Authorization
+    dirty = ("连不上 https://api.deepseek.com/v1/chat/completions"
+             " with key sk-abcdef1234567890abcdef 和 "
+             "Authorization: Bearer sk-zzzz9999888877776666")
+    errlog.log("测试", dirty)
+    raw = errlog.tail(20)
+    check("sk-abcdef1234567890abcdef" not in raw, "写盘前把 API Key 打码了")
+    check("sk-zzzz9999888877776666" not in raw, "Authorization 里的 Key 也打码了")
+    check("****" in raw, "打码后留了前缀，看得出是哪个 Key", raw.splitlines()[-1][:90])
+    check("连不上" in raw, "正文本身没被吃掉")
+
+    errlog.log("测试", "第二条")
+    items = errlog.recent(5)
+    check(len(items) >= 2, "内存里留得住最近几条", f"{len(items)} 条")
+    check(errlog.log_path().exists(), "日志文件真的落在盘上",
+          str(errlog.log_path()).replace(str(ROOT), "."))
+    check(errlog.tail(1).strip().endswith("第二条"), "读回来是最后一条")
+
+    # app 的门面方法要在（界面靠它把 JS 报错送进来）
+    for m in ("log_client_error", "recent_errors", "clear_errors"):
+        check(callable(getattr(app, m, None)), f"App.{m}() 在")
+    app.log_client_error("TypeError: x is null", "at foo (app.js:1:1)")
+    check(any(e["where"] == "界面" for e in errlog.recent(10)),
+          "界面报的错也能进记录")
+    errlog.clear()
+    check(not errlog.tail(5).strip(), "能清空")
+
+    # ══════════════════════════════════════════ 14. 乱格式模组 + 单人研读室
+    print("\n【14】乱格式模组解析 + 只有导演和 KP 的研读室")
     import time as _time
     from engine import docread, module_lib, study as study_mod
 
