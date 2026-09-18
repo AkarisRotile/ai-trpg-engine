@@ -296,8 +296,24 @@ function renderSeats() {
       n.appendChild(el('div', 'stat',
         `HP ${s.attrs.HP}/${s.attrs.MAXHP}  SAN ${s.attrs.SAN}  MP ${s.attrs.MP}  技能 ${(s.skills || []).length}`));
     }
-    if ((s.warnings || []).length) {
-      n.appendChild(el('div', 'warns', s.warnings.join('；')));
+    // 车卡过程说明。引擎缩放过的部分用中性文字讲清楚，不拿修复前的违规当红字报警。
+    // 引擎的契约：warnings 只放修完之后仍然成立的话（比如"还剩 12 点没用"），
+    // violations 是修复前的清单，界面不许把它当错误。
+    const notes = [];
+    const fixes = Array.isArray(s.chargen_repairs) ? s.chargen_repairs : [];
+    if (fixes.length) {
+      const pts = (s.chargen_spent != null && s.chargen_budget != null)
+        ? `技能点 ${s.chargen_spent}/${s.chargen_budget}`
+        : '技能点';
+      notes.push(`${pts}，引擎缩放了 ${fixes.length} 处`);
+    }
+    (s.warnings || []).forEach((w) => notes.push(w));
+    if (notes.length) {
+      // 只有车卡根本没成（PL 还没卡）才算真错，其余都是说明。
+      const bad = s.kind === 'PL' && !s.has_character;
+      const line = el('div', bad ? 'warns' : 'notes', notes.join('；'));
+      if (fixes.length) line.title = fixes.join('\n');
+      n.appendChild(line);
     }
 
     n.onclick = () => { S.activeSeat = s.seat_id; renderSeats(); renderRight(); };
@@ -892,6 +908,18 @@ function buildSeatEditor(seat, idx) {
     const v = mk('桌边说话的样子', 'table_voice', prof.table_voice || '',
       { span2: true, placeholder: '爱吐槽、说话短、掷骰前先算概率' });
     v.dataset.deep = 'profile';
+    // 桌边话量。只调说多少，说话规矩哪一档都一样。
+    const lv = String(prof.table_energy || 3);
+    mk('桌边话量', 'table_energy', lv, {
+      type: 'select',
+      options: [
+        ['1', '1 很少说话'],
+        ['2', '2 偏安静'],
+        ['3', '3 正常'],
+        ['4', '4 话偏多'],
+        ['5', '5 话最多'],
+      ],
+    });
   }
 
   const temp = mk('temperature', 'temperature', seat.temperature != null ? seat.temperature : 0.85,

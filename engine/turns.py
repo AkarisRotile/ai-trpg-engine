@@ -88,7 +88,10 @@ class GameLoop:
         # 桌边插话轮里"这次轮到谁接话"的游标（免得每次都点同一个人）
         self._tt_cursor = 0
         if session.clock is None:
-            session.clock = clock_mod.resolve_start(module, self.options)
+            # 守秘人研读模组时自己挑的开场日，优先级高于引擎的猜。
+            study = session.module_study or {}
+            session.clock = clock_mod.resolve_start(
+                module, self.options, picked=str(study.get("clock") or ""))
 
     # ══════════════════════════════════════════════ 时间
 
@@ -148,6 +151,7 @@ class GameLoop:
             agent = PLAgent(
                 seat, self.options, self.session.session_id,
                 seed=random.SystemRandom().randrange(1, 2 ** 31),
+                setting=self._setting(),
             )
             agent.kernel = self.kernel      # AI 只能通过它申请掷骰
             self.pls.append(agent)
@@ -162,6 +166,7 @@ class GameLoop:
             premise=self.session.premise,
             module_brief=self._module_brief(include_party=False),
             seed=random.SystemRandom().randrange(1, 2 ** 31),
+            setting=self._setting(),
         )
         self.kp.kernel = self.kernel
 
@@ -554,6 +559,16 @@ class GameLoop:
                     self._e("ooc", res["ooc"], seat_id=self.kp.seat_id,
                             name=self._player_of(self.kp), meta={"teatime": True})
         self.session.save()
+
+    def _setting(self) -> str:
+        """模组的时代背景，用来给提示词定用词语域。
+
+        没有模组、或者模组没写时代的时候返回空串，
+        提示词那边会退成「你自己从正文里判断」。
+        """
+        if not self.module:
+            return ""
+        return str(getattr(self.module, "era", "") or "").strip()
 
     def _module_brief(self, include_party: bool = True) -> str:
         """守秘人的全部情报。放进 system 而不是消息历史——

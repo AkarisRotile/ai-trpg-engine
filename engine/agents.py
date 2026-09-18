@@ -21,7 +21,7 @@ from . import chargen, glossary as glossary_mod, memory as memory_mod, prompts
 from . import player_memory
 from . import rules as rules_mod
 from .llm import BaseClient, LLMError, LLMResult, make_client
-from .linter import LintReport, lint
+from .linter import KP_CHANNELS, LintReport, lint
 
 TAG_RE = re.compile(
     r"<(think|act|ooc|mem|narr|secret|state|roll|recall|brief|sheet)>(.*?)(?:</\1>|$)",
@@ -259,7 +259,7 @@ def parse_pl_output(text: str, *, do_lint: bool = True) -> ChannelOutput:
     return out
 
 
-def parse_kp_output(text: str) -> ChannelOutput:
+def parse_kp_output(text: str, *, do_lint: bool = True) -> ChannelOutput:
     out = ChannelOutput(raw=text or "")
     tags = split_tags(text)
     for k in ("narr", "ooc", "secret", "state", "free", "think", "mem",
@@ -284,6 +284,11 @@ def parse_kp_output(text: str) -> ChannelOutput:
             target = tokens[0] if tokens else ""
             payload = tokens[1].strip() if len(tokens) > 1 else ""
             out.directives.append(Directive(kind, [target, payload]))
+
+    # 守秘人的叙述以前完全不过哨兵：<narr> 根本不在旧正则的认识范围内，
+    # 掉进 free 里也没人查。现在按 KP 的通道扫，<state> 那些指令自动跳过。
+    if do_lint:
+        out.lint = lint(text, channels=KP_CHANNELS)
     return out
 
 
@@ -555,10 +560,13 @@ class PLAgent(BaseAgent):
     kind = "PL"
 
     def __init__(self, seat: dict[str, Any], options: dict[str, Any],
-                 session_id: str, seed: int | None = None) -> None:
+                 session_id: str, seed: int | None = None,
+                 setting: str = "") -> None:
         super().__init__(seat, options, session_id, seed=seed)   # 已含跨周目玩家卡
         self.memory = memory_mod.MemoryCard.for_pl(seat, session_id)
         self.memory.model_backend = seat.get("model", "")
+        # 模组的时代背景。角色的用词跟着它走，玩家层（括号里）不受影响。
+        self.setting = setting
         self._rebuild_system()
 
     def _rebuild_system(self) -> None:
@@ -566,7 +574,8 @@ class PLAgent(BaseAgent):
         self.messages = [{
             "role": "system",
             "content": prompts.build_pl_system(
-                self.seat, self.rules, self.card.render_system_block()),
+                self.seat, self.rules, self.card.render_system_block(),
+                setting=self.setting),
         }]
 
     # -------------------------------------------------- 车卡
@@ -705,15 +714,21 @@ class PLAgent(BaseAgent):
                 self.stats.errors += 1
                 self.stats.last_error = e.message
 
-        # ---- 第三步：引擎按确定性算法裁剪。进场的卡必须合法 ----
-        fixed_sheet, repairs = chargen.repair_sheet(sheet, attrs,
-                                                    sheet.get("occupation"))
+        # ---- 第三步：引擎按意向缩放。进场的卡必须合法 ----
+        fixed_sheet, repairs, plan = chargen.allocate(sheet, attrs,
+                                                      sheet.get("occupation"))
         character = chargen.build_character_from_sheet(attrs, fixed_sheet)
         after = chargen.audit_sheet(fixed_sheet, attrs, fixed_sheet.get("occupation"))
+        # ★ warnings 只放**修完之后还成立的事**（比如"还剩 12 点没用"）。
+        #   修复前的违规走 violations 单独一个字段，界面不许拿它当红字报警。
+        #   踩过的坑：卡明明是合法的（388/388），座位卡上却飘着"技能点超支"，
+        #   用户以为引擎没管。原因就是这里把修之前的清单塞进了 warnings。
         return {"ok": True, "sheet": fixed_sheet, "character": character,
-                "warnings": [v["detail"] for v in violations] + list(audit["notes"]),
+                "warnings": list(after["notes"]),
                 "violations": violations, "repairs": repairs,
                 "spent": after["spent"], "budget": after["budget"],
+                "left_occ": plan.get("left_occ"),
+                "left_interest": plan.get("left_interest"),
                 "ooc": ooc, "raw": text,
                 "attrs": attrs, "derived": derived,
                 "usage": res}
@@ -936,7 +951,8 @@ class KPAgent(BaseAgent):
 
     def __init__(self, seat: dict[str, Any], options: dict[str, Any],
                  session_id: str, module_title: str = "", premise: str = "",
-                 module_brief: str = "", seed: int | None = None) -> None:
+                 module_brief: str = "", seed: int | None = None,
+                 setting: str = "") -> None:
         super().__init__(seat, options, session_id, seed=seed)
         # 守秘人要裁定后果，常驻多带战斗与理智两节
         self.rules = rules_mod.compose(
@@ -945,11 +961,14 @@ class KPAgent(BaseAgent):
         self.memory.model_backend = seat.get("model", "")
         self.module_title = module_title
         self.premise = premise
+        # 叙述的时代语域。模组写现代就说现代话，写未来就说未来的，不默认 1920 年代。
+        self.setting = setting
         self.messages = [{
             "role": "system",
             "content": prompts.build_kp_system(
                 seat, self.rules, module_title, premise, module_brief,
-                player_block=self.card.render_system_block(max_memes=1)),
+                player_block=self.card.render_system_block(max_memes=1),
+                setting=self.setting),
         }]
 
     def _parse(self, text: str) -> ChannelOutput:
@@ -972,7 +991,8 @@ class KPAgent(BaseAgent):
             "role": "system",
             "content": prompts.build_kp_system(
                 self.seat, self.rules, self.module_title, self.premise, module_brief,
-                player_block=self.card.render_system_block(max_memes=1)),
+                player_block=self.card.render_system_block(max_memes=1),
+                setting=self.setting),
         }]
 
     def chargen_briefing(self, module_brief: str, secret_terms: list[str],
@@ -1171,6 +1191,37 @@ class KPAgent(BaseAgent):
         res = self._call(self.messages, phase="play")
         out = parse_kp_output(res.text)
         out.usage = res
+
+        # 语域哨兵：叙述里冒出「不是A而是B」、破折号、Markdown 加粗这类
+        # 书面腔，就静默重写一次。守秘人的叙述是玩家整晚盯着的东西，
+        # 这些毛病放在这里比放在 PL 那边更显眼。
+        max_retry = int(self.options.get("linter_retry", 1))
+        if out.lint and out.lint.dirty and max_retry > 0:
+            self.stats.repairs += 1
+            self.messages.append({"role": "assistant", "content": res.text})
+            self.messages.append({
+                "role": "user",
+                "content": prompts.build_repair_message(out.lint.reason_text(), res.text),
+            })
+            try:
+                res2 = self._call(self.messages, phase="play")
+                out2 = parse_kp_output(res2.text)
+                out2.usage = res2
+                out2.repaired = True
+                if out2.narr or out2.secret:
+                    out = out2
+                    res = res2
+                else:
+                    out.notes.append("重写后仍不合格式，已按清洗结果保留。")
+            except LLMError:
+                out.notes.append("重写调用失败，已按清洗结果保留。")
+            finally:
+                # 补救用的两条消息不进正式历史
+                self.messages = self.messages[:-2]
+
+        if out.lint and out.lint.dirty:
+            out.notes.append("语域哨兵命中：" + out.lint.reason_text())
+
         # 守秘人的工具轮：掷骰与回忆都在**同一次生成**里拿到结果
         out = self._tool_pass(out, res, phase="play")
         self.messages.append({"role": "assistant", "content": (out.raw or "").strip()})

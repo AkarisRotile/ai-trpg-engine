@@ -236,6 +236,41 @@ def probe(window) -> None:
         bg = js("getComputedStyle(document.body).backgroundColor")
         check(bg not in (None, '', 'rgba(0, 0, 0, 0)'), "样式表已加载", str(bg))
 
+        # ★ 假警报回归：引擎缩放过的卡是**合法**的，座位卡上不许出现红字。
+        #   以前把修复前的违规清单塞进了 warnings，一张 388/388 的合法卡
+        #   顶着"技能点超支"报警，用户以为引擎没在管。
+        js("window.__seatProbe = null")
+        js("(function(){"
+           "  var st = S.state || {};"
+           "  var seats = (st.seats || []).slice();"
+           "  var pl = null;"
+           "  for (var i=0;i<seats.length;i++){ if(seats[i].kind==='PL'){ pl=seats[i]; break; } }"
+           "  if(!pl){ window.__seatProbe='NOSET'; return; }"
+           # 造一张"引擎缩放过的合法卡"：有修复记录，也有残留说明
+           "  pl.has_character = true;"
+           "  pl.chargen_repairs = ['预算不够，「图书馆使用」再降 12 → 45'];"
+           "  pl.chargen_violations = ['技能点超支 88 点'];"
+           "  pl.chargen_spent = 388; pl.chargen_budget = 388;"
+           "  pl.warnings = ['还剩 0 点没用（不违规，想用满可以用满）'];"
+           "  S.state.seats = seats;"
+           "  renderSeats();"
+           "  var card = document.querySelector('#seatList .seat.pl');"
+           "  window.__seatProbe = JSON.stringify({"
+           "    red: card ? card.querySelectorAll('.warns').length : -1,"
+           "    neutral: card ? card.querySelectorAll('.notes').length : -1,"
+           "    text: card ? (card.textContent || '') : ''"
+           "  });"
+           "})()")
+        probe_raw = js("window.__seatProbe")
+        probe = json.loads(probe_raw) if probe_raw and probe_raw.startswith("{") else {}
+        check(probe.get("red") == 0,
+              "合法卡上不出现红字报警（假警报回归）", f"红字 {probe.get('red')} 处")
+        check(probe.get("neutral", 0) >= 1,
+              "缩放说明改用中性文字摆出来", f"中性 {probe.get('neutral')} 处")
+        check("超支" not in (probe.get("text") or ""),
+              "正文里不会把修复前的『超支』念给用户",
+              (probe.get("text") or "")[:60])
+
     finally:
         time.sleep(0.5)
         for w in list(webview.windows):

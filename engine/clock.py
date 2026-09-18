@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -327,33 +328,67 @@ def _parse_date_spec(spec: str) -> tuple[int, int, int] | None:
             int(md.group(2)) if md else 0)
 
 
-def resolve_start(module: Any, options: dict[str, Any] | None = None) -> GameClock:
-    """定开场时刻，优先级：
+# 模组什么都没说时用的年份。这是兜底，不是默认值：模组写了时代就用模组的。
+_DEFAULT_YEAR = 1925
+
+
+def _hash_day(seed: str) -> tuple[int, int]:
+    """按模组 id 定下一个稳定的月日。
+
+    以前这里写死 10 月 3 日，每一局的日历都从同一天开始，
+    守秘人一开口就报同一个日子。同一模组每次开局仍然一样，不同模组不一样。
+    日子取 1 到 28，撞不到二月的边界。
+    """
+    h = hashlib.sha256((seed or "coc").encode("utf-8")).digest()
+    return h[0] % 12 + 1, h[1] % 28 + 1
+
+
+def resolve_start(module: Any, options: dict[str, Any] | None = None,
+                  picked: str = "") -> GameClock:
+    """定开场时刻，优先级从高到低：
 
     1. 模组的 `start_time`（写在 module_info.yaml 里，最准）
     2. 配置里的 `options.start_time`
-    3. 从模组的 `era` 里捞年份（「1925 年·美国马萨诸塞州」）+ 默认 10 月 3 日 20:00
-    4. 干脆用默认的 1925 年 10 月 3 日 20:00
+    3. 守秘人研读阶段挑的那一天（`picked`，来自研读输出的 <clock>）
+    4. 模组简介或开场设定里明写的日期
+    5. 模组 `era` 里的年份
+    6. 兜底：1925 年，月日按模组 id 定
 
-    只是给个像样的起点而已——真正要紧的是之后每一轮那张对照表。
+    第 4 步只扫简介和开场设定，不扫场景正文。正文里的日期多半是
+    历史资料或旧报纸上的，抠出来会把开场定到几十年前去。
+
+    这只是给个像样的起点。真正要紧的是之后每一轮那张对照表：
+    模型查表说话，不自己做日期加减。
     """
     opts = options or {}
-    spec = ""
-    if module is not None:
-        spec = str(getattr(module, "start_time", "") or "").strip()
-    if not spec:
-        spec = str(opts.get("start_time") or "").strip()
+    era = str(getattr(module, "era", "") or "") if module is not None else ""
+    note = f"（模组时代：{era}）" if era else ""
 
-    base = datetime(1925, 10, 3, 20, 0)
-    note = ""
+    src = ""
     if module is not None:
-        era = str(getattr(module, "era", "") or "")
-        if era:
-            note = f"（模组时代：{era}）"
+        src = str(getattr(module, "start_time", "") or "").strip()
+    if not src:
+        src = str(opts.get("start_time") or "").strip()
+    if not src:
+        src = str(picked or "").strip()
+    if not src and module is not None:
+        for field_name in ("summary", "premise"):
+            text = str(getattr(module, field_name, "") or "")
+            found = _parse_date_spec(text)
+            if found and found[0]:
+                src = text
+                break
+    if not src:
+        src = era
 
-    if spec:
-        parsed = _parse_date_spec(spec)
-        hm = _HM_RE.search(spec)
+    mid = str(getattr(module, "id", "") or "") if module is not None else ""
+    mo0, da0 = _hash_day(mid)
+    base = datetime(_DEFAULT_YEAR, mo0, da0, 20, 0)
+
+    if src:
+        parsed = _parse_date_spec(src)
+        # 只在短文本里认时刻。长简介里随便一个"点"字都可能被当成钟点。
+        hm = _HM_RE.search(src) if len(src) <= 60 else None
         y, mo, da = parsed if parsed else (0, 0, 0)
         y = y or base.year
         mo = mo or base.month
@@ -364,16 +399,6 @@ def resolve_start(module: Any, options: dict[str, Any] | None = None) -> GameClo
             base = datetime(y, mo, da, min(hh, 23), min(mi, 59))
         except ValueError:
             pass
-    elif note:
-        era = str(getattr(module, "era", "") or "")
-        parsed = _parse_date_spec(era)
-        if parsed:
-            y, mo, da = parsed
-            try:
-                base = base.replace(year=y or base.year, month=mo or base.month,
-                                    day=da or base.day)
-            except ValueError:
-                pass
 
     c = GameClock()
     c.set_dt(base)

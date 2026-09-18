@@ -1239,6 +1239,164 @@ def main() -> int:
     check(r2.get("ok") and not study_mod.load_study(target),
           "可以主动忘掉某个模组的研读")
 
+    # ══════════════════════════════════════════ 16. 语域与时代
+    print("\n【16】语域与时代：年代跟模组走，说话别像八股")
+
+    # ---- 16a. 时代语域：模组写什么年代，说的就是什么年代 ----
+    # 以前这里默认 1920 年代，模组写现代、写未来也照旧，叙述就串味了。
+    from engine import prompts as prompts_mod
+    from engine import linter as linter_mod
+    import re as _re16
+
+    era_txt = prompts_mod.era_note("2077 年 · 夜之城")
+    check("2077 年 · 夜之城" in era_txt, "时代语域会照抄模组给的时代")
+    check("括号里" in era_txt, "括号里的话明说了不受时代限制")
+    check("模组没写明时代" in prompts_mod.era_note(""),
+          "模组没写时代时给的是判断指引不是硬编码")
+
+    seat_probe = {
+        "seat_id": "pl_probe", "display_name": "测试",
+        "character": {"name": "测试员", "age": 30, "occupation": "记者"},
+        "profile": {"player_name": "测试"},
+    }
+    pl_txt = prompts_mod.build_pl_system(seat_probe, "（规则）", setting="2000 年 · 委内瑞拉")
+    check("2000 年 · 委内瑞拉" in pl_txt, "PL 提示词带上了模组的时代")
+    check("1925" not in pl_txt, "PL 提示词不再假设 1920 年代")
+
+    kp_txt = prompts_mod.build_kp_system(
+        {"seat_id": "kp_probe", "display_name": "KP", "profile": {}},
+        "（规则）", "测试模组", setting="2077 年 · 夜之城")
+    check("2077 年 · 夜之城" in kp_txt, "KP 叙述提示词也带上了时代")
+
+    # ---- 16b. 开场时刻：模组/配置/KP挑的/简介/era/兜底 ----
+    class _M:
+        def __init__(self, **kw):
+            self.id = kw.get("id", "m")
+            self.era = kw.get("era", "")
+            self.start_time = kw.get("start_time", "")
+            self.summary = kw.get("summary", "")
+            self.premise = kw.get("premise", "")
+
+    c1 = clock_mod.resolve_start(_M(start_time="1932-04-15 21:30", era="1925 年 · 阿卡姆"),
+                                 {"start_time": "1999-01-01 09:00"}, picked="1888-08-08")
+    check(c1.start.strftime("%Y-%m-%d %H:%M") == "1932-04-15 21:30",
+          "开场时刻：模组 start_time 最优先", c1.start.strftime("%Y-%m-%d %H:%M"))
+    c2 = clock_mod.resolve_start(_M(era="1925 年 · 阿卡姆"),
+                                 {"start_time": "1999-01-01 09:00"}, picked="1888-08-08")
+    check(c2.start.year == 1999, "开场时刻：配置次之", str(c2.start))
+    c3 = clock_mod.resolve_start(_M(era="1925 年 · 阿卡姆"), {}, picked="1911-11-11")
+    check(c3.start.strftime("%Y-%m-%d") == "1911-11-11",
+          "开场时刻：守秘人挑的那天再次之", str(c3.start))
+    c4 = clock_mod.resolve_start(_M(summary="故事发生在 2000 年 7 月 10 日。"), {})
+    check(c4.start.strftime("%Y-%m-%d") == "2000-07-10",
+          "开场时刻：能从简介里抠出日期", str(c4.start))
+
+    # 兜底不再写死 10 月 3 日：同一个模组稳定，不同模组不同
+    d1 = clock_mod.resolve_start(_M(id="aaa"), {}).start
+    d2 = clock_mod.resolve_start(_M(id="aaa"), {}).start
+    check(d1 == d2, "开场时刻：同一模组两次算出来一样", str(d1))
+    check((d1.month, d1.day) != (10, 3),
+          "开场时刻：月日不再固定是 10 月 3 日", f"{d1.month} 月 {d1.day} 日")
+    days = {(clock_mod.resolve_start(_M(id=f"mod{i}"), {}).start.month,
+             clock_mod.resolve_start(_M(id=f"mod{i}"), {}).start.day)
+            for i in range(30)}
+    check(len(days) >= 5, "开场时刻：不同模组的开局日不一样", f"{len(days)} 种")
+    bad_day = []
+    for i in range(400):
+        dd = clock_mod.resolve_start(_M(id=f"x{i}"), {}).start
+        if not (1 <= dd.month <= 12 and 1 <= dd.day <= 28):
+            bad_day.append(str(dd))
+    check(not bad_day, "开场时刻：400 个模组没有一个非法日期", str(bad_day[:2]))
+
+    # ---- 16c. 桌边语域：正例里不许留撇清 ----
+    bank = prompts_mod.TABLE_REGISTER.split("# 别写成这样")[0]
+    left = [w for w in ("我不去", "别指望我", "别催", "谁挨打谁上") if w in bank]
+    check(not left, "桌边正例里没有撇清式表态", str(left))
+    for label in ("行动", "附和", "打趣", "自嘲", "关心", "废话"):
+        check(f"**{label}**" in prompts_mod.TABLE_REGISTER, f"桌边话堆里有「{label}」")
+    check("是**朋友**" in prompts_mod.TABLE_REGISTER, "桌边语域点明了这桌人是朋友")
+    check("# 角色的动作怎么写" in pl_txt, "动作规格进得了 PL 提示词")
+
+    # ---- 16d. 哨兵：认得出守秘人的标签，也认得出机器通道 ----
+    kp_out = ("<narr>他抬起头——屋里安静了。</narr>\n"
+              "<state>advance 2h</state>\n"
+              "<ooc>（这也太吓人了）</ooc>")
+    rep = linter_mod.lint(kp_out, channels=linter_mod.KP_CHANNELS)
+    check(any(h.channel == "narr" and h.kind == "style" for h in rep.style_hits),
+          "哨兵抓到了 <narr> 里的破折号")
+    check(not any(h.channel == "state" for h in rep.hits),
+          "哨兵不去挑 <state> 指令的毛病")
+
+    machine = linter_mod.lint("<state>advance 2h —— 随便</state>", channels=linter_mod.KP_CHANNELS)
+    check(not machine.hits, "机器通道整个跳过，不是靠运气")
+
+    meta = linter_mod.lint("<narr>作为一个 AI，我建议你们</narr>",
+                           channels=linter_mod.KP_CHANNELS)
+    check(any(h.kind == "meta" for h in meta.hits), "守秘人自称 AI 也会被逮住")
+
+    # ---- 16e. 风格拦截：该抓的抓到、正常人话不误伤 ----
+    should_hit = [
+        ("这不是害怕，这是一种本能。", "「不是A而是B」句式"),
+        ("与其说他在看你，不如说他在看你的手。", "「与其说不如说」句式"),
+        ("他抬起头——屋里安静了。", "破折号"),
+        ("**我先上**", "Markdown 加粗"),
+        ("你别指望我，我不去。", "撇清式表态"),
+        ("理由是：他不想去。", "摆依据"),
+    ]
+    missed = []
+    for sent, label in should_hit:
+        got = [r for p, r in linter_mod.STYLE_PATTERNS if _re16.search(p, sent)]
+        if not got:
+            missed.append(label)
+    check(not missed, "该拦的句式一条都没漏", str(missed))
+
+    should_pass = [
+        "我先上，你们跟着", "这门锁着，我试试撬一下", "你没事吧",
+        "这屋里现在最危险的是你", "他看了我一眼，没说话",
+        "88——58——90 的三围", "时间是 1925—1930 之间", "价格 100--200 块",
+    ]
+    false_alarm = []
+    for sent in should_pass:
+        got = [r for p, r in linter_mod.STYLE_PATTERNS if _re16.search(p, sent)]
+        if got:
+            false_alarm.append((sent, got))
+    check(not false_alarm, "真人会说的话一句都没误伤", str(false_alarm[:2]))
+
+    # 重写指令只描述目标语域，不把被禁的写法再念一遍
+    instr = linter_mod.build_repair_instruction(rep.style_hits or [meta.hits[0]])
+    check("——" not in instr and "不是" not in instr,
+          "重写指令不复述被禁的写法")
+
+    # ---- 16f. 桌边话量 1-5 ----
+    def _energy_seat(lv):
+        return {"seat_id": "e", "display_name": "e",
+                "character": {"name": "N", "age": 30, "occupation": "记者"},
+                "profile": {"player_name": "e", "table_energy": lv}}
+
+    e1 = prompts_mod.build_pl_system(_energy_seat(1), "r")
+    e5 = prompts_mod.build_pl_system(_energy_seat(5), "r")
+    e3 = prompts_mod.build_pl_system(_energy_seat(3), "r")
+    check(e1 != e5, "话量 1 和 5 的提示词确实不一样")
+    check(prompts_mod.ENERGY_LEVELS[5][:10] in e5, "5 档把「话最多」写进去了")
+    check("# 你在桌上说多少" not in e3, "默认档 3 不多写一段，省 token")
+    check("角色卡" in e1, "话量档位不影响其余提示词内容")
+    # 档位再高也不放松说话规矩
+    check("怎么说话的规矩" in e5, "5 档也明说规矩一样算数")
+    # 越界的值要被夹回去，不能抛异常
+    for weird in (0, 9, "abc", None):
+        s = _energy_seat(weird)
+        try:
+            prompts_mod.build_pl_system(s, "r")
+            ok_weird = True
+        except Exception:  # noqa: BLE001
+            ok_weird = False
+        check(ok_weird, f"话量收到非法值 {weird!r} 也不崩")
+
+    # 界面上得有这个下拉
+    _ui_src = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+    check("table_energy" in _ui_src, "设置面板里有桌边话量的下拉")
+    check("'5', '5 话最多'" in _ui_src, "下拉有五个档位")
+
     # ══════════════════════════════════════════ 汇总
     print("\n" + "=" * 70)
     if failures:

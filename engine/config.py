@@ -154,6 +154,8 @@ def make_pl_seat(index: int, entry: Any = None, preset_index: int | None = None)
             "rigor_note": person.rigor_note(),
             "personality_traits": list(person.traits),
             "habits": list(person.habits),
+            # 桌边话量 1-5，默认 3。只调说多少，不放松说话规矩。
+            "table_energy": 3,
         },
         "character": {},
     }

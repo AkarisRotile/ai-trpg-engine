@@ -875,6 +875,12 @@ class App:
                 "inventory": char.get("inventory") or [],
                 "backstory": char.get("backstory", ""),
                 "warnings": st.get("chargen_warnings") or [],
+                # 车卡过程：引擎改了哪些、最后花了多少 / 预算多少。
+                # 界面拿这些显示一句中性的话，而不是把修复前的违规当红字报警。
+                "chargen_repairs": st.get("chargen_repairs") or [],
+                "chargen_violations": st.get("chargen_violations") or [],
+                "chargen_spent": st.get("chargen_spent"),
+                "chargen_budget": st.get("chargen_budget"),
                 "ready": bool(st.get("ready")),
                 "sheet_path": st.get("sheet_path", ""),
                 "player_id": (seat.get("profile") or {}).get("player_id", ""),
