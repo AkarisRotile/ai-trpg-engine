@@ -97,6 +97,8 @@ def probe(window) -> None:
             ("有开新团向导", "document.querySelectorAll('#modalNewGame').length", 1),
             ("左侧显示当前是哪一局",
              "document.querySelectorAll('#currentGame').length", 1),
+            ("左侧有桌面时间的角标",
+             "document.querySelectorAll('#clockBadge').length", 1),
             ("右栏标签页渲染完成", "document.querySelectorAll('#rightTabs .tab').length", 5),
             ("设置弹窗有全局选项", "document.querySelectorAll('#optionEditors .field').length", 5),
             ("设置弹窗有席位编辑器",
@@ -164,6 +166,23 @@ def probe(window) -> None:
         check(n_kp == 7, "守秘人下拉里 7 个人都能选（可以换庄）", f"{n_kp} 项")
         js("document.querySelector('#modalRoster [data-close]').click()")
 
+        # 研读室：只有你和 KP 的那个单人小窗
+        js("document.querySelector('[data-modal=\"modalStudy\"]').click()")
+        time.sleep(2.0)
+        check(bool(js("document.getElementById('modalStudy').classList.contains('open')")),
+              "研读室弹窗能打开")
+        n_sm = js("document.querySelectorAll('#studyModuleSel option').length")
+        try:
+            n_sm = int(n_sm)
+        except (TypeError, ValueError):
+            n_sm = -1
+        check(n_sm >= 1, "研读室里能挑模组", f"{n_sm} 项")
+        check(bool(js("document.getElementById('btnRunStudy')"
+                      "&&document.getElementById('btnStudyAsk')"
+                      "&&document.getElementById('btnRereadStudy')")),
+              "研读室有「读一遍 / 重读 / 追问」三个按钮")
+        js("document.querySelector('#modalStudy [data-close]').click()")
+
         bg = js("getComputedStyle(document.body).backgroundColor")
         check(bg not in (None, '', 'rgba(0, 0, 0, 0)'), "样式表已加载", str(bg))
 
@@ -183,6 +202,15 @@ def main() -> int:
         print(f"找不到 {index}")
         return 1
 
+    # 每次冒烟都用全新的浏览器用户目录，并且先按指纹清一次缓存：
+    # pywebview 会把 index.html / app.js 缓存起来，用老 profile 测出来的
+    # 其实是上一版的界面（这个坑踩过一次）。
+    from engine.uicache import clear_if_stale
+    clear_if_stale(index, cfgmod.data_root())
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    profile = cfgmod.data_root() / ".webview-smoke" / stamp
+    profile.mkdir(parents=True, exist_ok=True)
+
     window = webview.create_window(
         "界面冒烟测试", url=str(index), js_api=app,
         width=1400, height=900, background_color="#0d0f14",
@@ -190,7 +218,7 @@ def main() -> int:
     webview.start(
         lambda: threading.Thread(target=probe, args=(window,), daemon=True).start(),
         http_server=True, private_mode=False,
-        storage_path=str(cfgmod.data_root() / ".webview"))
+        storage_path=str(profile))
 
     print("\n" + "=" * 62)
     failed = [r for r in RESULTS if not r[0]]

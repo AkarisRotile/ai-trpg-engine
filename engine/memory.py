@@ -55,6 +55,9 @@ class TreeNode:
     turn: int = 0
     scene: str = ""
     updated: int = 0
+    # 桌上的钟走到哪一刻知道的这件事（"10月3日 21:15"）。
+    # 有它才说得出「这是三天前听来的」——没有它，模型会把什么都算成"刚才"。
+    when: str = ""
 
     def title(self) -> str:
         return self.label or self.text[:12]
@@ -63,7 +66,8 @@ class TreeNode:
         return {"id": self.id, "text": self.text, "kind": self.kind,
                 "state": self.state, "parent": self.parent, "label": self.label,
                 "brief": self.brief, "note": self.note, "source": self.source,
-                "turn": self.turn, "scene": self.scene, "updated": self.updated}
+                "turn": self.turn, "scene": self.scene, "updated": self.updated,
+                "when": self.when}
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> "TreeNode | None":
@@ -83,6 +87,7 @@ class TreeNode:
             turn=int(d.get("turn") or 0),
             scene=str(d.get("scene") or ""),
             updated=int(d.get("updated") or 0),
+            when=str(d.get("when") or ""),
         )
 
 
@@ -191,10 +196,12 @@ class ChronicleEntry:
     text: str
     tags: list[str] = field(default_factory=list)
     source: str = ""          # 引擎写入时标记来源（如 handout 文件名）
+    when: str = ""            # 这件事发生在桌上的哪一刻（"10月3日 21:15"）
 
     def to_dict(self) -> dict[str, Any]:
         return {"turn": self.turn, "scene": self.scene, "kind": self.kind,
-                "text": self.text, "tags": list(self.tags), "source": self.source}
+                "text": self.text, "tags": list(self.tags), "source": self.source,
+                "when": self.when}
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> "ChronicleEntry":
@@ -205,6 +212,7 @@ class ChronicleEntry:
             text=str(d.get("text", "") or ""),
             tags=list(d.get("tags") or []),
             source=str(d.get("source", "") or ""),
+            when=str(d.get("when", "") or ""),
         )
 
 
@@ -248,6 +256,9 @@ class MemoryCard:
         self.session_id: str = ""
         self.player_id: str = ""      # 归属的人（决定这份记忆存进哪个文件夹）
         self.path: Path | None = None
+        # 桌上的钟现在走到哪一刻——每轮由引擎刷新，新记忆自动带上时间。
+        # 有它，多年以后（或者三天以后）才说得清"这事是什么时候知道的"。
+        self.now: str = ""
         self._seq = 0
 
     # -------------------------------------------------- 认知树
@@ -278,7 +289,7 @@ class MemoryCard:
     def tree_add(self, text: str, kind: str = "fact", state: str = "confirmed",
                  parent_ref: str = "", label: str = "", brief: str = "",
                  note: str = "", turn: int = 0, scene: str = "",
-                 source: str = "") -> tuple[TreeNode, bool]:
+                 source: str = "", when: str = "") -> tuple[TreeNode, bool]:
         """加一个节点。文字重复就当作"又提到了一次"，只更新轮次，不重复长枝。"""
         text = (text or "").strip().strip('"').strip("'")
         if not text:
@@ -313,13 +324,13 @@ class MemoryCard:
                         parent=parent_id, label=lbl, brief=brf,
                         note=note, source=source,
                         turn=turn, scene=scene or self.situation.get("current_scene", ""),
-                        updated=turn)
+                        updated=turn, when=when)
         self.tree.append(node)
         # 同时进一条流水：树是"我现在怎么想"，流水是"我见过什么"。
         # 流水只增不改，供检索用（拿到 handout 之后再回头找旧线索时用得上），
         # 提示词里渲染的是索引/树，所以不会重复占 token。
         self.add("clue" if kind == "fact" else "event", text,
-                 turn=turn, scene=scene, tags=[kind])
+                 turn=turn, scene=scene, tags=[kind], when=when)
         return node, True
 
     def tree_set_state(self, ref: str, state: str, turn: int = 0) -> TreeNode | None:
@@ -488,7 +499,9 @@ class MemoryCard:
             one = one[:20]
             # ★ 索引只给名词和一句话。**依据、来源、完整原文都不给**——
             #   那正是"要用 <recall> 去捞"的东西。
-            lines.append(f"{mark} {n.title()}" + (f" —— {one}" if one else ""))
+            #   时间戳是例外：没有它，模型会把三天前听来的事说成"刚才"。
+            stamp = f"（{n.when}）" if n.when else ""
+            lines.append(f"{mark} {n.title()}{stamp}" + (f" —— {one}" if one else ""))
             rels = self._relations(n, live)
             if rels:
                 lines.append("    " + "；".join(rels))
@@ -512,7 +525,7 @@ class MemoryCard:
             out.append({
                 "term": term, "ok": True, "label": node.title(),
                 "text": node.text, "brief": node.brief, "note": node.note,
-                "source": node.source, "state": node.state,
+                "source": node.source, "state": node.state, "when": node.when,
                 "parent": by_id[node.parent].title() if node.parent in by_id else "",
                 "children": [c.text for c in self._children(node.id)],
                 "links": self._relations(node, list(self.tree)),
@@ -527,6 +540,8 @@ class MemoryCard:
                 parts.append(f"「{d['term']}」—— 你使劲想，但脑子里一片空白。")
                 continue
             blk = [f"▸ {d['label']}（{NODE_STATES.get(d['state'], d['state'])}）"]
+            if d.get("when"):
+                blk.append(f"  （你是在 {d['when']} 知道这件事的）")
             blk.append(f"  {d['text']}")
             if d.get("note"):
                 blk.append(f"  你当时的依据：{d['note']}")
@@ -671,7 +686,8 @@ class MemoryCard:
     # -------------------------------------------------- 写入
 
     def add(self, kind: str, text: str, turn: int = 0, scene: str = "",
-            tags: Iterable[str] | None = None, source: str = "") -> bool:
+            tags: Iterable[str] | None = None, source: str = "",
+            when: str = "") -> bool:
         """追加一条 L2。完全重复（归一化后相同）的内容会被丢弃，防止复读式膨胀。"""
         text = (text or "").strip().strip('"').strip("'")
         if not text:
@@ -683,6 +699,7 @@ class MemoryCard:
         self.chronicle.append(ChronicleEntry(
             turn=turn, scene=scene or self.situation.get("current_scene", ""),
             kind=kind or "event", text=text, tags=list(tags or []), source=source,
+            when=when or self.now,
         ))
         return True
 
@@ -755,7 +772,8 @@ class MemoryCard:
                     text = text[:nm.start()].strip()
                 node, created = self.tree_add(text, kind=kind, state=state,
                                               parent_ref=parent_ref, label=label,
-                                              note=note, turn=turn, scene=scene)
+                                              note=note, turn=turn, scene=scene,
+                                              when=self.now)
                 if created:
                     desc = f"{NODE_STATES.get(state, state)}｜{node.title()}：{text}"
                     if parent_ref and node.parent:

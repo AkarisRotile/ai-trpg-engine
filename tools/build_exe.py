@@ -51,12 +51,17 @@ HIDDEN = [
     "PIL", "PIL.Image", "PIL.ImageDraw", "PIL.ImageFont", "PIL.ImageFilter",
     "openpyxl",                    # 写 COC7 Excel 角色卡用
     "openpyxl.styles", "openpyxl.utils",
+    "docx",                        # .docx 模组（python-docx）
+    "docx.api", "docx.opc.constants",
+    "xlrd",                        # 老式 .xls 表格（薄暮之国时间线那种）
+    "olefile",                     # 老式 .doc（OLE 复合文档，自己抽正文）
     "engine",
     "engine.app", "engine.agents", "engine.turns", "engine.session",
     "engine.prompts", "engine.memory", "engine.player_memory",
     "engine.glossary", "engine.rules", "engine.dice", "engine.chargen",
     "engine.module_lib", "engine.linter", "engine.llm", "engine.config",
     "engine.spoiler", "engine.roster", "engine.sheet", "engine.ocr",
+    "engine.docread", "engine.study", "engine.uicache", "engine.clock",
 ]
 
 
@@ -169,7 +174,7 @@ def main() -> int:
 
     # 数据目录跟 exe 同级
     data = install_dir / "data"
-    for sub in ("modules", "memory", "players", "templates", "rules"):
+    for sub in ("modules", "memory", "players", "templates", "rules", "studies"):
         (data / sub).mkdir(parents=True, exist_ok=True)
     (data / "runtime" / "sessions").mkdir(parents=True, exist_ok=True)
 
@@ -197,25 +202,54 @@ def main() -> int:
         print("已附带演示模组：洋馆之夜（本来就在位）")
 
     (install_dir / "读我.txt").write_text(
-        "AI 跑团引擎 · COC 第七版\n"
-        "=" * 40 + "\n\n"
-        "双击「" + APP_NAME + ".exe」启动。\n\n"
-        "第一次使用：\n"
-        "  1. 点右上角「设置」，给守秘人与每个玩家各配一个接口。\n"
-        "     · 想用 DeepSeek 官方：接口选「DeepSeek 官方」，粘上 Key 即可。\n"
-        "     · 想用别的服务：接口选「自定义」，填 Base URL / Key / 模型名。\n"
-        "     · 想先零成本试跑：接口选「离线模拟」，不联网不花钱。\n"
-        "     · 每个席位是独立的，可以让不同 AI 走不同服务商。\n"
-        "  2. 点「模组」，选一个剧本（已附带「洋馆之夜」）。\n"
-        "  3. 依次点「① 车卡」→「② 开局」→「▶ 自动推进」。\n\n"
-        "你自己的模组放这里：\n"
+        "AI 跑团引擎 · 克苏鲁的呼唤第七版\n"
+        + "=" * 44 + "\n\n"
+        "【这是什么】\n"
+        "  一个跑团工具：守秘人（KP）和所有玩家（PL）都由 AI 扮演。\n"
+        "  你只要开着看，一桌人自己就跑起来了。\n\n"
+        "【怎么开始】\n"
+        "  1. 双击「" + APP_NAME + ".exe」\n"
+        "  2. 先什么都不用配，直接点左上角「🎬 开新团」\n"
+        "     选《洋馆之夜》，一路点「① 车卡 → ② 开局 → ▶ 自动推进」\n"
+        "     —— 默认就是「离线模拟」模式，不联网、不花钱，\n"
+        "        但车卡、掷骰、记忆、桌边聊天全流程都是真的。\n\n"
+        "【想让它真的聪明起来】\n"
+        "  离线模拟只是占位实现，剧情很水。要真跑，得给它接上模型：\n"
+        "  1. 点右上角「⚙️ 设置」\n"
+        "  2. 给守秘人和每个玩家各配一个接口（每个席位是独立的，\n"
+        "     可以走不同服务商、用不同 Key）：\n"
+        "       · DeepSeek 官方 —— 接口选它，粘上 Key 就行\n"
+        "       · 自定义 —— 填任意 OpenAI 兼容端点的 URL / Key\n"
+        "  3. 模型名不用手打：点模型那一栏下面的「🔍 拉取模型列表」，\n"
+        "     点着选就好。\n"
+        "  4. 配完点「测试全部连接」确认通不通\n\n"
+        "【你自己的模组放这里】\n"
         "  data\\modules\\你的模组名\\\n"
-        "      module_info.yaml   模组信息\n"
+        "      module_info.yaml   模组信息（标题、简介、推荐人数）\n"
+        "      era                时代背景——审卡时会用到，\n"
+        "                         比如「1925 年·美国马萨诸塞州」\n"
         "      secret_truth.md    幕后真相（只有 KP 看得到，玩家绝对看不到）\n"
         "      scenes\\*.md        各幕内容\n"
-        "      handouts\\*         线索道具\n\n"
-        "跑团记录、存档、每个 AI 的记忆都在 data\\ 下面，\n"
-        "升级程序时只要不动 data\\ 就不会丢。\n",
+        "      handouts\\*         线索道具\n"
+        "  单个文件直接丢进 data\\modules\\ 也行——.md .txt .pdf .docx .doc\n"
+        "  .xlsx .xls 都能读。网上下的本子经常是一堆老格式混在一个文件夹里\n"
+        "  （正文 .doc、怪物资料 .docx、时间线 .xls、地图 .png），\n"
+        "  整个文件夹丢进去就能认。\n"
+        "  扫描版的 PDF 可以在「📁 模组」里用 OCR 面板识别（要另配一个\n"
+        "  看得懂图的模型，DeepSeek 官方没有）。\n\n"
+        "【新模组好不好跑？先让 KP 讲给你听】\n"
+        "  顶栏点「📖 研读室」：那里只有你和守秘人，没有玩家。\n"
+        "  它会通读一遍，然后给你一份不藏着的通读报告——幕后真相、\n"
+        "  绕不过去的骨架、最容易翻车的地方、它想加什么料，全摊开说。\n"
+        "  看完还能接着追问。读过的本会存下来，以后拿它开团不用重读。\n\n"
+        "【数据在哪】\n"
+        "  全在 data\\ 里面：配置、模组、存档、每个 AI 的记忆、\n"
+        "  生成好的 Excel 角色卡（data\\players\\<网名>\\）。\n"
+        "  升级程序时只要不动 data\\ 就不会丢。\n\n"
+        "【想改成你们自己的名字】\n"
+        "  右上角「🎭 名册与站位」里可以直接改名册上那 7 个人的网名和性格，\n"
+        "  或者直接编辑 data\\roster.yaml。\n"
+        "  改成你们自己人，跑起来才是你们那桌。\n",
         encoding="utf-8")
 
     # 只统计"这个程序本身的体积"：exe + _internal。

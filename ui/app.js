@@ -23,6 +23,8 @@ const EVENT_META = {
   chargen:  { label: '车卡',   icon: '📋', filter: 'chargen' },
   brief:    { label: '简报',   icon: '📣', filter: 'brief' },
   study:    { label: 'KP功课', icon: '📝', filter: 'study' },
+  study_report: { label: '通读报告', icon: '📖', filter: 'study_report' },
+  study_talk:   { label: '研读室', icon: '☕', filter: 'study_talk' },
   audit:    { label: '审卡',   icon: '🔍', filter: 'audit' },
   reveal:   { label: '解禁',   icon: '🔓', filter: 'reveal' },
   pitch:    { label: '车卡意向', icon: '💡', filter: 'pitch' },
@@ -35,6 +37,7 @@ const DEFAULT_FILTERS = {
   system: true, scene: true,
   chargen: true, brief: true, pitch: true, study: true, audit: true,
   reveal: true, director: true,
+  study_report: true, study_talk: true,
 };
 
 const S = {
@@ -116,11 +119,12 @@ function addEntry(evt) {
     const b = el('div', 'body', esc(evt.text));
     node.appendChild(b);
   } else if (type === 'chargen' || type === 'brief' || type === 'study'
-             || type === 'reveal' || type === 'audit') {
+             || type === 'reveal' || type === 'audit' || type === 'study_report') {
     const who = el('div', 'who');
     const label = {
       chargen: '的角色卡', brief: '给全桌的赛前简报（不含剧透）',
       study: '开局前做的功课', reveal: '模组解禁 · 全桌公开',
+      study_report: '的通读报告 · 只给你看',
       audit: (evt.meta && evt.meta.title) || '审卡',
     }[type];
     who.appendChild(el('span', null, `${meta.icon} ${esc(evt.name || '')} ${label}`));
@@ -137,14 +141,20 @@ function addEntry(evt) {
         tbl.appendChild(row);
       });
       node.appendChild(tbl);
-    } else {
-      node.appendChild(el('pre', null, esc(evt.text)));
     }
     if (type === 'study' && evt.meta && (evt.meta.spine_ids || []).length) {
       node.appendChild(el('div', 'hint',
         '大纲核对通过：' + evt.meta.spine_ids.join(' → ')));
     }
-    node.appendChild(el('pre', null, esc(evt.text)));
+    if (type === 'study_report') {
+      // 通读报告很长，日志里默认折叠，要细看就点开（或者去「📖 研读室」里看全文）
+      const d = el('details');
+      d.appendChild(el('summary', null, '展开全文'));
+      d.appendChild(el('pre', null, esc(evt.text)));
+      node.appendChild(d);
+    } else {
+      node.appendChild(el('pre', null, esc(evt.text)));
+    }
     if (type === 'study' && evt.meta) {
       if (evt.meta.expansion) {
         const d = el('details');
@@ -619,12 +629,21 @@ async function refreshState() {
 
     $('roundNum').textContent = st.round != null ? st.round : 0;
     $('jobHint').textContent = st.busy ? '引擎正在工作…' : '';
+    const studyMode = st.mode === 'study';
     $('sessionLabel').textContent = st.has_session
-      ? `${st.session_id} · ${st.module_title || '自由跑团'} · 第 ${st.round} 轮`
+      ? (studyMode
+        ? `研读室 · ${st.module_title || '自由跑团'}`
+        : `${st.session_id} · ${st.module_title || '自由跑团'} · 第 ${st.round} 轮`)
       : '尚未建立会话';
-    $('sceneBar').textContent = st.scene_id
-      ? `当前场景：${sceneTitle(st.scene_id)}`
-      : '尚未开局';
+    $('sceneBar').textContent = studyMode
+      ? `📖 研读室：桌上只有你和守秘人 ·《${st.module_title || ''}》`
+      : (st.scene_id ? `当前场景：${sceneTitle(st.scene_id)}` : '尚未开局');
+    document.body.classList.toggle('study-mode', studyMode);
+    const cb = $('clockBadge');
+    if (cb) {
+      cb.textContent = st.clock_short ? `🕰 ${st.clock_short}` : '';
+      cb.title = st.clock || '桌面上现在是什么时候';
+    }
 
     const btns = ['btnPrepare', 'btnStart', 'btnAuto', 'btnStep', 'btnStop', 'btnFinish'];
     btns.forEach((id) => { const b = $(id); if (b) b.disabled = !!st.busy; });
@@ -1299,6 +1318,101 @@ function renderModules() {
   });
 }
 
+/* ══════════════════════════ 研读室 ══════════════════════════ */
+
+let STUDIES = [];
+
+async function openStudyRoom() {
+  openModal('modalStudy');
+  const b = await call('bootstrap');
+  S.modules = b.modules || S.modules;
+  STUDIES = b.studies || [];
+  renderStudyPicker();
+  await syncStudyRoom();
+}
+
+function renderStudyPicker() {
+  const sel = $('studyModuleSel');
+  const keep = sel.value || S.selectedModule;
+  sel.innerHTML = '';
+  if (!S.modules.length) {
+    sel.appendChild(el('option', null, '（data/modules 里还没有模组）'));
+    sel.disabled = true;
+    return;
+  }
+  sel.disabled = false;
+  S.modules.forEach((m) => {
+    const o = el('option', null, `${m.title || m.id}　(${m.scene_count || 0} 幕)`);
+    o.value = m.id;
+    sel.appendChild(o);
+  });
+  if (keep && S.modules.some((m) => m.id === keep)) sel.value = keep;
+  renderStudySaved();
+}
+
+function renderStudySaved() {
+  const id = $('studyModuleSel').value;
+  const hit = STUDIES.find((s) => s.module_id === id);
+  const h = $('studySaved');
+  if (hit) {
+    h.textContent = `✓ 这个本 ${hit.keeper || '某位 KP'} 已经读过`
+      + `（${(hit.updated_at || '').slice(0, 16)}）——开真局会直接复用。`;
+  } else {
+    h.textContent = '这个本还没读过。';
+  }
+}
+
+async function syncStudyRoom() {
+  const st = await call('study_state');
+  const rep = $('studyReport');
+  const talk = $('studyTalk');
+
+  if (!st.open) {
+    rep.className = 'study-report empty';
+    rep.textContent = '还没读过。挑一个模组，点「让 KP 读一遍」。';
+  } else {
+    if (st.report) {
+      rep.className = 'study-report';
+      rep.textContent = st.report;
+    } else if (st.busy) {
+      rep.className = 'study-report empty';
+      rep.textContent = '守秘人正在读……（这个本越厚越慢）';
+    }
+    talk.innerHTML = '';
+    (st.talk || []).forEach((t) => {
+      const line = el('div', 'study-line' + (t.who === '导演' ? ' me' : ''));
+      line.appendChild(el('span', 'who', esc(t.who || '？')));
+      line.appendChild(el('span', 'said', esc(t.text || '')));
+      talk.appendChild(line);
+    });
+    if (!(st.talk || []).length && st.report) {
+      talk.appendChild(el('div', 'empty', '还没有问过它什么。'));
+    }
+  }
+  const busy = !!st.busy;
+  ['btnRunStudy', 'btnRereadStudy', 'btnForgetStudy', 'btnStudyAsk']
+    .forEach((id) => { const b = $(id); if (b) b.disabled = busy; });
+}
+
+async function runStudy(force) {
+  const id = $('studyModuleSel').value;
+  if (!id) { toast('先挑一个模组', 'err'); return; }
+  S.selectedModule = id;
+  const r = await call('study_room', id, !!force);
+  toast(r.ok ? '研读室开起来了，它正在读' : r.message, r.ok ? 'ok' : 'err');
+  if (r.ok) { await syncStudyRoom(); setTimeout(syncStudyRoom, 1200); }
+}
+
+async function askStudy() {
+  const box = $('studyAskInput');
+  const q = (box.value || '').trim();
+  if (!q) return;
+  const r = await call('study_ask', q);
+  if (!r.ok) { toast(r.message, 'err'); return; }
+  box.value = '';
+  await syncStudyRoom();
+}
+
 /* ══════════════════════════ 玩家档案弹窗 ══════════════════════════ */
 
 async function refreshPlayers() {
@@ -1420,6 +1534,7 @@ function bind() {
       if (id === 'modalPlayers') { await refreshPlayers(); }
       if (id === 'modalRules') { await refreshRules(); }
       if (id === 'modalSessions') { await refreshSessions(); }
+      if (id === 'modalStudy') { await openStudyRoom(); return; }
       openModal(id);
     };
   });
@@ -1442,6 +1557,46 @@ function bind() {
 
   $('btnScrollBottom').onclick = () => { logEl().scrollTop = logEl().scrollHeight; };
   $('btnClearLog').onclick = () => { logEl().innerHTML = ''; S.events = []; };
+
+  // 研读室
+  $('studyModuleSel').onchange = renderStudySaved;
+  $('btnRunStudy').onclick = () => runStudy(false);
+  $('btnRereadStudy').onclick = async () => {
+    const id = $('studyModuleSel').value;
+    if (!id) { toast('先挑一个模组', 'err'); return; }
+    const hit = STUDIES.find((s) => s.module_id === id);
+    if (hit && !confirm(`《${hit.title || id}》已经读过了，重读会丢掉旧记录（再花一次钱）。继续？`)) return;
+    await runStudy(true);
+  };
+  $('btnForgetStudy').onclick = async () => {
+    const id = $('studyModuleSel').value;
+    if (!id) return;
+    if (!confirm('忘掉这个模组的研读记录？以后开这个本要重新读一遍。')) return;
+    const r = await call('forget_study', id);
+    toast(r.ok ? '已忘掉' : '没有这个模组的研读记录', r.ok ? 'ok' : 'err');
+    const b = await call('bootstrap');
+    STUDIES = b.studies || [];
+    renderStudySaved();
+  };
+  $('btnRefreshStudies').onclick = async () => {
+    const b = await call('bootstrap');
+    S.modules = b.modules || S.modules;
+    STUDIES = b.studies || [];
+    renderStudyPicker();
+    await syncStudyRoom();
+  };
+  $('btnStudyAsk').onclick = askStudy;
+  $('studyAskInput').onkeydown = (e) => { if (e.key === 'Enter') askStudy(); };
+  $('btnStudyToGame').onclick = async () => {
+    const id = $('studyModuleSel').value;
+    if (!id) { toast('先挑一个模组', 'err'); return; }
+    const r = await call('new_session', id, '');
+    if (!r.ok) { toast(r.message, 'err'); return; }
+    toast('已按这个模组建好新团，接着去「🎬 开新团」确认站位', 'ok');
+    closeAllModals();
+    await refreshState();
+    await openNewGame();
+  };
 
   // 推进
   $('btnPrepare').onclick = async () => {

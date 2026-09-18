@@ -12,7 +12,9 @@
 
 from __future__ import annotations
 
+import copy
 import queue
+import re
 import threading
 import traceback
 from pathlib import Path
@@ -113,6 +115,7 @@ class App:
             "sessions": Session.list_sessions()[:50],
             "players": player_memory.list_player_cards(),
             "roster": self.get_roster(),
+            "studies": self.list_studies(),
             "glossary": glossary.coverage(),
             "rules_full": rules_mod.has_full_text(),
             "busy": self.busy,
@@ -425,6 +428,147 @@ class App:
         self._run_async(job, "ocr")
         return {"ok": True, "message": "OCR 任务已启动"}
 
+    # ══════════════════════════════════════════════ 模组研读室
+
+    def study_room(self, module_id: str, force: bool = False) -> dict[str, Any]:
+        """开一间研读室：**只有你和守秘人**，没有玩家。
+
+        它会先通读模组、做一份功课，再给你一份**不藏着的**通读报告——
+        幕后真相、骨架、难点、吐槽，全摊开说。因为这里没有玩家，
+        它的保密义务不存在。
+        """
+        if self.busy:
+            return {"ok": False, "message": "有任务在跑，先停下再来。"}
+        mid = (module_id or "").strip()
+        if not mid:
+            return {"ok": False, "message": "先选一个模组。"}
+        module = module_lib.load_module(mid)
+        if not module:
+            return {"ok": False, "message": f"找不到模组 {mid}"}
+
+        cfg = copy.deepcopy(self.cfg)
+        cfg["seats"] = [s for s in cfg.get("seats", []) if s.get("kind") == "KP"]
+        if not cfg["seats"]:
+            return {"ok": False, "message": "没有可用的守秘人座位，先去「设置」配一个。"}
+
+        self.module = module
+        # 研读室按**模组**复用同一个会话目录：同一个本反复打开，聊过的话还在。
+        sid = "study-" + re.sub(r'[\\/:*?"<>|]+', "_", mid)[:60]
+        prev = Session.load(sid)
+        self.session = prev if (prev and prev.mode == "study") else Session(sid, module_id=mid)
+        self.session.module_id = mid
+        self.session.mode = "study"
+        self.session.phase = "study"
+        try:
+            self.loop = GameLoop(cfg, self.session, self._emit, module, study_mode=True)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "message": str(e)}
+
+        already = bool(self.session.study_report) and not force
+
+        def job() -> None:
+            assert self.loop and self.session
+            self.loop._ensure_kp()
+            kp = self.loop.kp
+            assert kp is not None
+            name = self.loop._player_of(kp)
+            self._sys(f"── 研读室 ·《{module.title}》──")
+            for w in (module.warnings or []):
+                self._sys(f"模组提示：{w}")
+            self._sys(f"这个模组被切成了 {len(module.scenes)} 幕，"
+                      f"守秘人资料约 {len(module.truth):,} 字。")
+            if already and self.session.study_report:
+                self._sys("上次谈过的内容还在，已经摆回桌上了。")
+                self._emit({"type": "study_report", "text": self.session.study_report,
+                            "name": name, "seat_id": "kp", "round": 0, "ts": 0,
+                            "meta": {"restored": True}})
+                for t in self.session.study_talk:
+                    self._emit({"type": "study_talk", "text": t.get("text", ""),
+                                "name": t.get("who", ""), "round": 0, "ts": 0,
+                                "meta": {"restored": True}})
+                return
+
+            self.loop._kp_study(force=force)
+
+            self._sys("── 守秘人正在写通读报告 ──")
+            brief = self.loop._module_brief(include_party=False)
+            res = kp.study_report(brief, module.title)
+            if not res.get("ok"):
+                self._sys(f"通读报告没写出来：{res.get('error')}")
+            else:
+                self.session.study_report = res["report"]
+                self._emit({"type": "study_report", "text": res["report"],
+                            "name": name, "seat_id": "kp", "round": 0, "ts": 0})
+            if res.get("ooc"):
+                self.session.study_talk.append({"who": name, "text": res["ooc"]})
+                self._emit({"type": "study_talk", "text": res["ooc"], "name": name,
+                            "seat_id": "kp", "round": 0, "ts": 0})
+            self.session.save()
+            self._sys("── 下面你可以直接问它任何关于这个模组的问题"
+                      "（它不会藏）──")
+
+        self._run_async(job, "study")
+        return {"ok": True, "message": "研读室已开", "session": self.state()}
+
+    def study_ask(self, question: str) -> dict[str, Any]:
+        """在研读室里问守秘人一个问题。"""
+        q = (question or "").strip()
+        if not q:
+            return {"ok": False, "message": "没有内容。"}
+        if not self.loop or not self.session or self.session.mode != "study":
+            return {"ok": False, "message": "研读室还没开。先点「📖 让 KP 读一遍」。"}
+        if self.busy:
+            return {"ok": False, "message": "上一个问题还在回答，等一下。"}
+
+        def job() -> None:
+            assert self.loop and self.session
+            self.loop._ensure_kp()
+            kp = self.loop.kp
+            assert kp is not None
+            name = self.loop._player_of(kp)
+            self.session.study_talk.append({"who": "导演", "text": q})
+            self._emit({"type": "study_talk", "text": q, "name": "导演",
+                        "round": 0, "ts": 0})
+            brief = self.loop._module_brief(include_party=False)
+            res = kp.study_answer(brief, self.session.module_study,
+                                  self.session.study_talk[:-1], q)
+            if not res.get("ok"):
+                self._sys(f"守秘人没答上来：{res.get('error')}")
+                return
+            self.session.study_talk.append({"who": name, "text": res["answer"]})
+            self._emit({"type": "study_talk", "text": res["answer"], "name": name,
+                        "seat_id": "kp", "round": 0, "ts": 0})
+            self.session.save()
+
+        self._run_async(job, "study_ask")
+        return {"ok": True}
+
+    def study_state(self) -> dict[str, Any]:
+        s = self.session
+        if not s or s.mode != "study":
+            return {"open": False}
+        return {
+            "open": True,
+            "module_id": s.module_id,
+            "module_title": self.module.title if self.module else "",
+            "scene_count": len(self.module.scenes) if self.module else 0,
+            "report": s.study_report,
+            "talk": s.study_talk,
+            "study": s.module_study,
+            "busy": self.busy,
+        }
+
+    def list_studies(self) -> list[dict[str, Any]]:
+        from . import study as study_mod
+        return study_mod.list_studies()
+
+    def forget_study(self, module_id: str) -> dict[str, Any]:
+        """忘掉某个模组的研读（下次会重新读一遍）。"""
+        from . import study as study_mod
+        ok = study_mod.delete_study(module_id)
+        self._sys(f"已忘掉《{module_id}》的研读记录。" if ok else "没有这个模组的研读记录。")
+        return {"ok": ok}
+
     def module_study(self) -> dict[str, Any]:
         """守秘人开局前做的功课（理解 / 大纲 / 扩展 / 彩蛋），导演可见。"""
         if not self.session:
@@ -513,10 +657,21 @@ class App:
         self._sys(f"已载入会话 {session_id}（第 {s.round} 轮）")
         return {"ok": True, "session": self.state()}
 
+    def _study_guard(self) -> dict[str, Any] | None:
+        """研读室里没有玩家，跑团的那几个按钮点了也不该有反应。"""
+        if self.session and self.session.mode == "study":
+            return {"ok": False,
+                    "message": "现在是研读室（桌上只有你和 KP），没法跑团。"
+                               "想开真局就点左下角的「用这个模组开真局」。"}
+        return None
+
     def prepare(self) -> dict[str, Any]:
         """车卡：掷属性 + 让每个 PL 按规则书自己造一张卡。"""
         if not self.session:
             return {"ok": False, "message": "还没有建立会话。"}
+        guard = self._study_guard()
+        if guard:
+            return guard
 
         def job() -> None:
             assert self.loop and self.session
@@ -531,6 +686,9 @@ class App:
         """开局：守秘人开场 + 各 PL 入戏锚定。"""
         if not self.session or not self.loop:
             return {"ok": False, "message": "还没有建立会话。"}
+        guard = self._study_guard()
+        if guard:
+            return guard
         if self.session.phase == "setup":
             return {"ok": False, "message": "请先点击『车卡』。"}
 
@@ -546,6 +704,9 @@ class App:
     def step(self) -> dict[str, Any]:
         if not self.session or not self.loop:
             return {"ok": False, "message": "还没有建立会话。"}
+        guard = self._study_guard()
+        if guard:
+            return guard
 
         def job() -> None:
             assert self.loop
@@ -561,6 +722,9 @@ class App:
         """自动推进。随时可以按停止。"""
         if not self.session or not self.loop:
             return {"ok": False, "message": "还没有建立会话。"}
+        guard = self._study_guard()
+        if guard:
+            return guard
 
         limit = int(rounds or self.cfg.get("options", {}).get("max_rounds", 40))
 
@@ -602,6 +766,9 @@ class App:
         return {"ok": True}
 
     def finish(self) -> dict[str, Any]:
+        guard = self._study_guard()
+        if guard:
+            return guard
         if self.loop:
             self.loop.finish("手动结束")
         return {"ok": True, "session": self.state()}
@@ -616,6 +783,7 @@ class App:
                 "has_session": False, "busy": self.busy, "auto": False,
                 "session_id": "", "module_id": "", "module_title": "",
                 "scenes": [], "scene_id": "", "round": 0, "phase": "setup",
+                "mode": "setup",
                 "ended_reason": "", "seats": seats,
                 "tokens": None, "context": None,
                 "last_error": self.last_job_error,
@@ -627,11 +795,14 @@ class App:
             "session_id": s.session_id,
             "module_id": s.module_id,
             "module_title": self.module.title if self.module else "",
+            "mode": s.mode,
             "scenes": ([{"id": sc.id, "title": sc.title} for sc in self.module.scenes]
                        if self.module else []),
             "scene_id": s.scene_id,
             "round": s.round,
             "phase": s.phase,
+            "clock": (s.clock.render() if s.clock else ""),
+            "clock_short": (s.clock.short() if s.clock else ""),
             "ended_reason": s.ended_reason,
             "seats": seats,
             "tokens": self.loop.token_report() if self.loop else None,

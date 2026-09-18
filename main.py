@@ -34,6 +34,17 @@ def _fatal(msg: str, detail: str = "") -> None:
     sys.exit(1)
 
 
+def _reset_ui_cache(index: Path) -> None:
+    """界面文件变了就清一次浏览器缓存（否则新版本会显示上一版的界面）。"""
+    try:
+        from engine import config as cfgmod
+        from engine.uicache import clear_if_stale
+        if clear_if_stale(index, cfgmod.data_root()):
+            print("[ui] 界面文件已更新，清掉浏览器缓存", file=sys.stderr)
+    except Exception:
+        pass
+
+
 def main() -> int:
     try:
         import webview
@@ -64,6 +75,8 @@ def main() -> int:
 
     debug = bool(os.environ.get("COC_DEBUG"))
     smoke = bool(os.environ.get("COC_SMOKE"))
+
+    _reset_ui_cache(index)
 
     try:
         window = webview.create_window(
@@ -127,10 +140,14 @@ def main() -> int:
                 result["steps"].append(
                     ["桥接注入", bool(js("typeof window.pywebview !== 'undefined' "
                                         "&& !!window.pywebview.api"))])
+                # mods 里带上每个模组解析出几幕：打包版的 docread
+                # （.doc / .docx / .xls / .xlsx）到底能不能用，看这个最直接
                 js("window.__p = null; window.pywebview.api.bootstrap().then(function(b){"
                    "window.__p = JSON.stringify({seats:(b.config.seats||[]).length,"
                    "providers:Object.keys(b.config._providers||{}),"
-                   "modules:(b.modules||[]).length, rules_full:b.rules_full});"
+                   "modules:(b.modules||[]).length, rules_full:b.rules_full,"
+                   "mods:(b.modules||[]).map(function(m){return m.id+':'+"
+                   "(m.error?('ERR '+m.error):((m.scene_count||0)+' scenes'));})});"
                    "}).catch(function(e){ window.__p = JSON.stringify({err:String(e)}); });")
                 raw = None
                 for _ in range(60):
@@ -145,6 +162,10 @@ def main() -> int:
                 result["steps"].append(["席位渲染", int(js("document.querySelectorAll('.seat').length") or 0) >= 1])
                 result["steps"].append(
                     ["模组弹窗", int(js("document.querySelectorAll('#moduleList .module-card').length") or 0) >= 1])
+                # 有没有哪个模组解析失败（打包版最容易在这里翻车：docread 的
+                # python-docx / xlrd / olefile 漏了 hidden import 就会 ERR）
+                bad_mods = [m for m in (data.get("mods") or []) if "ERR" in str(m)]
+                result["steps"].append(["模组解析无报错", not bad_mods])
                 toasts = js("Array.from(document.querySelectorAll('#toasts .toast'))"
                             ".map(function(t){return t.textContent;})") or []
                 result["toasts"] = toasts

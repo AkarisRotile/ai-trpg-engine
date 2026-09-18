@@ -713,6 +713,322 @@ def main() -> int:
     check(callable(_pr) and callable(_pc),
           "AI 能用的工具只有掷骰与联想召回，没有检索/浏览器通道")
 
+    # ══════════════════════════════════════════ 11. 时间
+    print("\n【11】桌上的钟：今天是几号、前天是哪天")
+    from engine import clock as clock_mod
+    from datetime import datetime as _dt, timedelta as _td
+
+    c = clock_mod.GameClock()
+    c.set_dt(_dt(1925, 4, 3, 15, 40))
+    c.start = _dt(1925, 4, 1, 20, 0)
+    blk = c.render()
+
+    # 用户要的那三个例子，一个都不能错
+    check("1925 年 4 月 3 日" in blk, "「今天是四月三日」写对了",
+          blk.splitlines()[1] if len(blk.splitlines()) > 1 else "")
+    check("4月1日" in blk and "前天" in blk, "「四月一日是前天」")
+    check("3月31日" in blk and "三天前" in blk, "「三月三十一日是三天前」")
+    check("4月2日" in blk.split("4月1日")[0], "昨天也算对了")
+    check("（星期五）" in blk, "带上了星期几")
+    check("已经过了 1 天" in blk or "1 天" in blk, "算得出开场到现在过了多久",
+          c.elapsed_text())
+    check("下午" in blk and "15:40" in blk, "钟点说法对（下午三点四十）",
+          c.clock_cn())
+
+    # 跨月 / 跨年
+    c2 = clock_mod.GameClock()
+    c2.set_dt(_dt(1926, 1, 2, 9, 0))
+    b2 = c2.render()
+    check("1925年12月31日" in b2 and "前天" in b2,
+          "跨年也对：1月2日的前天是去年12月31日（而且写明了年份）",
+          [l for l in b2.splitlines() if "12月31" in l][:1])
+    c3 = clock_mod.GameClock()
+    c3.set_dt(_dt(1925, 3, 2, 9, 0))
+    b3 = c3.render()
+    check("2月28日" in b3, "跨月也对：3月2日的三天前是2月28日（平年）")
+
+    # 「不要把所有过去都说成昨天」——不同的天数必须给不同的词
+    labels = [clock_mod.rel_label(n) for n in (0, 1, 2, 3, 5, 10, 20, 45, 400)]
+    check(len(set(labels)) == len(labels), "每一天的说法都不一样，没有一律叫「昨天」",
+          "、".join(labels))
+    check(labels[1] == "昨天" and labels[2] == "前天" and labels[3] == "三天前",
+          "昨天 / 前天 / 三天前 各就各位")
+
+    # 拨钟：守秘人说"过了两小时"
+    c4 = clock_mod.GameClock()
+    c4.set_dt(_dt(1925, 10, 3, 21, 0))
+    check(clock_mod.parse_duration("2h") == 120, "认得「2h」")
+    check(clock_mod.parse_duration("两小时") == 120, "认得「两小时」")
+    check(clock_mod.parse_duration("1d 3h") == 1620, "认得「1d 3h」")
+    check(clock_mod.parse_duration("半个钟头") == 30, "认得「半个钟头」")
+    check(clock_mod.parse_duration("等了一会儿") == 0, "认不出来就返回 0（不会瞎猜）")
+    check(clock_mod.parse_absolute("10月5日 08:00", c4.dt) == _dt(1925, 10, 5, 8, 0),
+          "认得绝对时刻「10月5日 08:00」")
+    check(clock_mod.parse_absolute("08:30", c4.dt) == _dt(1925, 10, 4, 8, 30),
+          "只给钟点时，已经过点就算明天")
+    kind, arg = clock_mod.parse_clock_directive("advance", "2h", "")
+    check(kind == "advance" and arg == "2h", "<state> advance 2h 能被识别")
+    kind, arg = clock_mod.parse_clock_directive("time:", "10月5日", "08:00")
+    check(kind == "set" and "10月5日" in arg and "08:00" in arg,
+          "<state> time 10月5日 08:00 能被识别")
+
+    # 开场时刻：模组 era 里的年份要能用上
+    class _M:
+        era = "1925 年 · 美国马萨诸塞州"
+        start_time = ""
+    mc = clock_mod.resolve_start(_M(), {})
+    check(mc.year == 1925, "从模组的 era 里读出了年份", str(mc.year))
+    class _M2:
+        era = "1925 年"
+        start_time = "1928-06-01 22:30"
+    mc2 = clock_mod.resolve_start(_M2(), {})
+    check(mc2.year == 1928 and mc2.month == 6 and mc2.hour == 22,
+          "模组写了 start_time 就以它为准", mc2.short())
+
+    # 存进会话、读回来，钟不能停
+    from engine.session import Session as _S
+    s = _S("clk-test")
+    s.clock = c4
+    s.save()
+    back = _S.load("clk-test")
+    check(back is not None and back.clock is not None
+          and back.clock.short() == c4.short(), "钟能随存档一起存下来",
+          back.clock.short() if (back and back.clock) else "（无）")
+
+    # ══════════════════════════════════════════ 12. KP 的指令通道
+    # 这一段是补的：<state> 的参数以前取错了位置，于是私聊、handout、
+    # 场景推进、KP 主动发起的检定全都静默失效，日志里只留一句"找不到目标"。
+    print("\n【12】守秘人的 <state> 指令：参数取对了没有")
+    from engine.agents import Directive as _Dir, parse_kp_output as _pko2
+    cases = [
+        ("whisper pl_1 门框内侧有划痕", "whisper", "pl_1", "门框内侧有划痕"),
+        ("grant_handout pl_1 邀请信", "grant_handout", "pl_1", "邀请信"),
+        ("check pl_1 侦查 regular", "check", "pl_1", "侦查 regular"),
+        ("damage pl_1 1d3", "damage", "pl_1", "1d3"),
+        ("san pl_1 0/1d4", "san", "pl_1", "0/1d4"),
+    ]
+    bad_args = []
+    for line, kind, want_target, want_payload in cases:
+        d = _pko2(f"<state>{line}</state>").directives[0]
+        got = (d.kind, d.arg(1), d.arg(2))
+        if got != (kind, want_target, want_payload):
+            bad_args.append(f"{line} → {got}")
+    check(not bad_args, "目标与内容没取错位（arg(1)=目标 / arg(2)=内容）",
+          "；".join(bad_args) or "5 种指令全对")
+    d = _pko2("<state>advance_scene scene_02</state>").directives[0]
+    check(d.arg(1) == "scene_02", "场景推进的参数也取对了", repr(d.arg(1)))
+    d = _pko2("<state>note 今晚降温</state>").directives[0]
+    check(d.arg(1) == "今晚降温", "备注的参数也取对了", repr(d.arg(1)))
+    d = _pko2("<state>openroll 1d6 那东西会不会动</state>").directives[0]
+    check(d.arg(1) == "1d6" and d.arg(2) == "那东西会不会动",
+          "公开掷骰的表达式与用途各就各位",
+          f"{d.arg(1)!r} / {d.arg(2)!r}")
+
+    # 端到端：真让守秘人把 handout 发出去，看玩家是不是真的拿到了
+    app3 = App()
+    if app3.new_session("demo_洋馆之夜").get("ok"):
+        app3.prepare()
+        app3.wait_idle(600)
+        app3.start()
+        app3.wait_idle(600)
+        if app3.loop and app3.loop.pls:
+            pl = app3.loop.pls[0]
+            h = app3.module.handouts[0] if (app3.module and app3.module.handouts) else None
+            if h:
+                app3.loop._one_directive(_Dir("grant_handout", [pl.seat_id, h.title]))
+                got = app3.session.pending_private.get(pl.seat_id) or []
+                check(any(h.title in x for x in got),
+                      "守秘人发 handout，玩家真的收到了",
+                      f"{pl.display_name} ←《{h.title}》")
+            app3.loop._one_directive(_Dir("whisper", [pl.seat_id, "门把手是温的"]))
+            got = app3.session.pending_private.get(pl.seat_id) or []
+            check(any("门把手是温的" in x for x in got), "守秘人私下说话，玩家真的收到了")
+            before_scene = app3.session.scene_id
+            app3.loop._one_directive(_Dir("advance_scene", ["scene_02_书房"]))
+            check(app3.session.scene_id == "scene_02_书房",
+                  "守秘人能推动场景", f"{before_scene} → {app3.session.scene_id}")
+            hp0 = (pl.seat.get("character") or {}).get("attributes", {}).get("HP", 0)
+            app3.loop._one_directive(_Dir("damage", [pl.seat_id, "1d3"]))
+            hp1 = (pl.seat.get("character") or {}).get("attributes", {}).get("HP", 0)
+            check(hp1 < hp0, "守秘人能造成伤害（HP 真的掉了）", f"{hp0} → {hp1}")
+            san0 = (pl.seat.get("character") or {}).get("attributes", {}).get("SAN", 0)
+            app3.loop._one_directive(_Dir("san", [pl.seat_id, "0/1d4"]))
+            san1 = (pl.seat.get("character") or {}).get("attributes", {}).get("SAN", 0)
+            check(san1 <= san0, "守秘人能要求理智检定", f"SAN {san0} → {san1}")
+
+    # ══════════════════════════════════════════ 13. 乱格式模组 + 单人研读室
+    print("\n【13】乱格式模组解析 + 只有导演和 KP 的研读室")
+    import time as _time
+    from engine import docread, module_lib, study as study_mod
+
+    # 11a. 真实世界里拿到的模组是 .doc/.docx/.xls/.xlsx/.png 混在一起的
+    messy_src = ROOT / "data" / "modules" / "不更文-吞噬深渊之影1+2"
+    messy_id = ""
+    if messy_src.is_dir():
+        shutil.copytree(messy_src, data / "modules" / messy_src.name, dirs_exist_ok=True)
+        messy_id = messy_src.name
+        t0 = _time.monotonic()
+        mm = module_lib.load_module(messy_id)
+        dt = _time.monotonic() - t0
+        ext = sorted({f.suffix.lower() for f in messy_src.rglob("*") if f.is_file()})
+        print(f"         目录里是这些格式：{' '.join(ext)}")
+        check(mm is not None, "乱格式模组能读进来")
+        if mm:
+            print(f"         《{mm.title}》：{len(mm.scenes)} 幕 / "
+                  f"手书 {len(mm.handouts)} 份 / KP 资料 {len(mm.truth):,} 字 / "
+                  f"耗时 {dt:.1f}s")
+            check(len(mm.scenes) >= 10, "能被切成可用的幕数",
+                  f"{len(mm.scenes)} 幕")
+            check(len(mm.truth) > 20_000, "KP 资料读全了（不是只读了个标题）",
+                  f"{len(mm.truth):,} 字")
+            check(all(sc.body.strip() for sc in mm.scenes),
+                  "每一幕都有正文（没有空壳幕）")
+            check(all(len(sc.body) < len(mm.truth) for sc in mm.scenes),
+                  "单幕正文比 KP 全资料短（说明分幕是真切开的）")
+        # 单文件读：.doc / .docx / .xls / .xlsx 各来一次
+        got = {}
+        for f in sorted(messy_src.rglob("*")):
+            if f.is_file() and f.suffix.lower() in {".doc", ".docx", ".xls", ".xlsx"}:
+                kept = docread.read_any(f)
+                got[f.suffix.lower()] = len(kept.text)
+        check(all(v > 200 for v in got.values()),
+              "每种老格式都能读出正文",
+              "、".join(f"{k} {v:,}字" for k, v in sorted(got.items())))
+    else:
+        warn(False, "没找到乱格式模组样本，跳过", str(messy_src))
+
+    # 11b. 研读室：只有「我」和 KP 的单人小窗
+    print("         ── 研读室 ──")
+    app2 = App()
+    target = messy_id or "demo_洋馆之夜"
+    r = app2.study_room(target)
+    check(r.get("ok"), "研读室能开起来", str(r.get("message", "")))
+    ev2: list[dict] = []
+    wait(app2, ev2, 600)
+    st2 = app2.study_state()
+    check(st2.get("open"), "研读室处于打开状态")
+    check(bool(st2.get("study")), "KP 已经把模组读了一遍（功课在）")
+    if st2.get("study"):
+        ids = st2["study"].get("spine_ids") or []
+        sk = st2["study"].get("spine") or ""
+        check(len(ids) >= 3, "研读产出了骨架（分幕清单）",
+              f"{len(ids)} 个场景 id / 骨架 {len(sk)} 字")
+    rep = st2.get("report") or ""
+    check(bool(rep), "通读报告写出来了", f"{len(rep)} 字")
+    # 报告是给导演看的：幕后真相必须摊开，不许打码
+    check(("真相" in rep) or ("幕后" in rep), "通读报告里有「真相」章节")
+    check(not any(k in rep for k in ("[已隐藏]", "无可奉告", "我不能透露")),
+          "研读室里 KP 没有对导演保密")
+    check(any(e.get("type") == "study_report" for e in ev2),
+          "通读报告作为事件推到了界面")
+    # 研读室没有玩家
+    check(len(getattr(app2.loop, "pls", []) or []) == 0, "研读室里一个玩家都没有")
+    check(app2.session.mode == "study", "会话被标成了 study 模式")
+    check(app2.session.round == 0, "研读室不推进回合")
+
+    # 追问
+    ok_q = app2.study_ask("第二章那个摄政公园，玩家不去的话会怎样？")
+    check(ok_q.get("ok"), "能在研读室里追问")
+    wait(app2, ev2, 300)
+    st3 = app2.study_state()
+    talk = st3.get("talk") or []
+    check(len(talk) >= 2, "追问与回答都进了研读记录", f"{len(talk)} 条")
+    check(any(t.get("who") == "导演" for t in talk), "导演的话被记下来了")
+    check(all(t.get("text", "").strip() for t in talk), "没有空回答")
+
+    # 研读记录会落盘，下次开同一个团直接复用
+    saved = study_mod.load_study(target)
+    check(bool(saved), "研读记录已存到磁盘（下次不用重读）")
+    check(any(x.get("module_id") == target for x in app2.list_studies()),
+          "研读记录出现在列表里")
+
+    # 再开一次同一个本：谈过的话应该原样摆回桌上，而不是从头再来
+    ev2.clear()
+    again = app2.study_room(target)
+    check(again.get("ok"), "同一个本可以再次打开研读室")
+    wait(app2, ev2, 120)
+    st4 = app2.study_state()
+    check(st4.get("report") == rep, "重开时通读报告原样回来（没有重读、没有重花钱）")
+    check(len(st4.get("talk") or []) >= 2, "重开时之前的问答也回来了",
+          f"{len(st4.get('talk') or [])} 条")
+    check(any((e.get("meta") or {}).get("restored") for e in ev2),
+          "界面收到的是一条「恢复」而不是新报告")
+
+    # 研读室不是"一局团"，不该混进存档列表
+    check(not any(s.get("module_id") == target and s.get("mode") == "study"
+                  for s in app2.list_sessions()),
+          "研读室不会被当成一个存档")
+
+    # 研读完的 KP，开真局时还记得这本
+    r3 = app2.new_session(target)
+    check(r3.get("ok"), "研读过的模组能直接开真局", str(r3.get("message", "")))
+    check(bool(study_mod.load_study(target)), "开真局时仍读得到那份研读记录")
+
+    # 真跑一轮，看时间有没有真的进到 AI 的上下文里
+    print("         ── 跑起来之后的钟 ──")
+    check(app2.session.clock is not None, "开真局时会话里有一只钟")
+    t_before = app2.session.clock.short() if app2.session.clock else ""
+    print(f"         开场：{t_before}")
+    if app2.session.clock:
+        cb = app2.session.clock.render()
+        check("[日期对照表" in cb and "前天" in cb,
+              "给 AI 的那块时间里有「日期对照表」")
+        check("1925" in cb, "年份是从模组/配置里来的，不是凭空写的",
+              cb.splitlines()[1][:60])
+
+    app2.wait_idle(10)
+    app2.prepare()
+    app2.wait_idle(600)
+    app2.start()
+    app2.wait_idle(600)
+    app2.run_auto(2)
+    app2.wait_idle(900)
+    st_clk = app2.state()
+    t_after = st_clk.get("clock_short") or ""
+    check(bool(t_after), "跑完之后界面上还看得到时间", t_after)
+    check(t_after != t_before, "时间确实往前走了", f"{t_before} → {t_after}")
+    # 时间有真的进到模型上下文里（玩家和守秘人都该看到）
+    import re as _re2
+    got_time = []
+    for ag in ([app2.loop.kp] if app2.loop and app2.loop.kp else []) + \
+              (app2.loop.pls if app2.loop else []):
+        blob = "\n".join(str(m.get("content", "")) for m in ag.messages[-8:])
+        if "[现在的时间]" in blob and "[日期对照表" in blob:
+            got_time.append(ag.display_name)
+    check(len(got_time) >= 2, "每个座位每一轮都拿到了「现在几点 + 日期对照表」",
+          "、".join(got_time) or "（一个都没拿到）")
+
+    # 守秘人拨钟：从它真会写的那段输出一路走到底
+    from engine.agents import parse_kp_output as _pko
+    if app2.loop and app2.loop.kp:
+        before = app2.session.clock.short()
+        kp_text = ("<narr>你们在门厅里等着，壁炉的火一点点矮下去。</narr>\n"
+                   "<state> advance 3h </state>")
+        _out = _pko(kp_text)
+        check([d.kind for d in _out.directives] == ["advance"],
+              "守秘人写的 <state> advance 3h 能被解析成拨钟指令",
+              str([d.kind for d in _out.directives]))
+        for _d in _out.directives:
+            app2.loop._one_directive(_d)
+        after = app2.session.clock.short()
+        check(after != before, "守秘人能用 <state> advance 把钟拨过去",
+              f"{before} → {after}")
+        # 把钟拨到"明天"，对照表要跟着改口
+        from engine.agents import Directive as _D
+        app2.loop._one_directive(_D("time", ["10月5日", "08:00"]))
+        c_now = app2.session.clock
+        check((c_now.month, c_now.day, c_now.hour) == (10, 5, 8),
+              "守秘人能把钟直接拨到指定时刻", c_now.short())
+        app2.loop._tick_clock()          # 新的一轮，对照表重算
+        blk3 = app2.session.clock.render()
+        check("10月4日" in blk3 and "昨天" in blk3,
+              "拨过之后，昨天/前天都跟着变了", app2.session.clock.short())
+
+    # 也可以主动忘掉，下次重新读一遍
+    r2 = app2.forget_study(target)
+    check(r2.get("ok") and not study_mod.load_study(target),
+          "可以主动忘掉某个模组的研读")
+
     # ══════════════════════════════════════════ 汇总
     print("\n" + "=" * 70)
     if failures:

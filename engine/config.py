@@ -276,6 +276,13 @@ def default_config() -> dict[str, Any]:
             "retrospective": True,     # 散场后让每个玩家复盘（跨周目记忆的生长点）
             "reveal_after_end": True,  # 结局后解禁模组原文给玩家看
             "teatime_rounds": 2,       # 散场茶话会来回几次
+            # —— 桌上的钟 ——
+            # 引擎自己管时间，每一轮把"哪天是哪天"的对照表算好给 AI。
+            # 模型自己推日子一定会把什么都叫"昨天"，这是唯一靠谱的解法。
+            "minutes_per_round": 10,   # 每轮默认过去多久（0 = 完全由守秘人说了算）
+            "start_time": "",          # 开场时刻，如 "1925-10-03 20:00"（留空取模组或默认）
+            "clock_past_days": 7,      # 对照表往前列几天
+            "clock_future_days": 3,    # 对照表往后列几天
             "auto_start": False,
         },
         "pricing": {                   # 界面上的费用估算，单位：元 / 百万 token

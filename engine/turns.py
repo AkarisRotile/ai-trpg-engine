@@ -25,8 +25,10 @@ from typing import Any, Callable
 import yaml
 
 from . import chargen, memory as memory_mod, module_lib, rules as rules_mod
+from . import clock as clock_mod
 from . import config as cfgmod
 from . import player_memory, spoiler
+from . import study as study_mod
 from .agents import BaseAgent, ChannelOutput, Directive, KPAgent, PLAgent
 from .dice import DiceKernel
 from .llm import LLMError
@@ -45,11 +47,13 @@ class GameLoop:
 
     def __init__(self, cfg: dict[str, Any], session: Session,
                  emit: Callable[[dict[str, Any]], None],
-                 module: module_lib.Module | None = None) -> None:
+                 module: module_lib.Module | None = None,
+                 study_mode: bool = False) -> None:
         self.cfg = cfg
         self.session = session
         self.emit_raw = emit
         self.module = module
+        self.study_mode = study_mode or session.mode == "study"
         self.options = dict(cfg.get("options") or {})
 
         seed = random.SystemRandom().randrange(1, 2 ** 31)
@@ -62,8 +66,9 @@ class GameLoop:
                     if s.get("kind") == "PL" and s.get("enabled", True)]
         if not kp_seats:
             raise RuntimeError("没有可用的守秘人座位。请先在设置里配置 KP。")
-        if not pl_seats:
-            raise RuntimeError("没有可用的玩家座位。请先在设置里至少配置一名 PL。")
+        if not pl_seats and not self.study_mode:
+            raise RuntimeError("没有可用的玩家座位。请在设置里至少配置一名 PL。"
+                              "（只想让 KP 读模组的话，用「📖 模组研读室」。）")
 
         self.kp: KPAgent | None = None
         self.pls: list[PLAgent] = []
@@ -78,6 +83,36 @@ class GameLoop:
         self._kp_pending_dice: list[str] = []
         # 明骰：这一轮全桌都看见的骰子，下一轮发给所有 PL（含掷的人自己）
         self._public_dice: list[str] = []
+        # 桌上的钟：模型自己算日子一定会把什么都叫"昨天"，所以引擎替它算
+        self._clock_dirty = False
+        if session.clock is None:
+            session.clock = clock_mod.resolve_start(module, self.options)
+
+    # ══════════════════════════════════════════════ 时间
+
+    def _tick_clock(self) -> str:
+        """每轮开头拨一次钟，并给出这一轮的「现在几点 + 日期对照表」。
+
+        默认每轮往前走一点点（可配 `minutes_per_round`，设 0 就完全由守秘人说了算）。
+        守秘人上一轮要是自己写了 `advance`/`time`，这里就不再叠加默认值——
+        否则"等了两个钟头"会被引擎偷偷再加十分钟。
+        """
+        c = self.session.clock
+        if c is None:
+            return ""
+        if not self._clock_dirty:
+            c.advance(int(self.options.get("minutes_per_round", 10) or 0))
+        self._clock_dirty = False
+        # 让新长出来的记忆自动带上时间戳：没有它，"这是三天前听来的"
+        # 这种话模型根本说不出来，它只会说"刚才"。
+        stamp = c.stamp()
+        for agent in [self.kp, *self.pls]:
+            if agent is not None and getattr(agent, "memory", None) is not None:
+                agent.memory.now = stamp
+        return c.render(
+            past_days=int(self.options.get("clock_past_days", 7) or 7),
+            future_days=int(self.options.get("clock_future_days", 3) or 3),
+        )
 
     # ══════════════════════════════════════════════ 事件
 
@@ -378,13 +413,34 @@ class GameLoop:
             lines.append("\n".join(bits))
         return "\n".join(lines) or "（这几个人是第一次一起跑，没有旧事可挖）"
 
-    def _kp_study(self) -> dict[str, Any]:
+    def _kp_study(self, force: bool = False) -> dict[str, Any]:
         """开局前的功课：读模组 → 写理解 / 大纲 / 扩展 / 彩蛋。
+
+        已读过的模组**直接复用**——真实主持人读完一遍就记住了，
+        下次带同一个本不用重读。想重读就 force=True。
 
         「大纲不能偏」是可校验的：它抄下来的场景 id 必须和模组实际的一字不差，
         对不上就打回重写；再对不上就强制以模组原文为准。
         """
         assert self.kp is not None
+        mid = self.module.id if self.module else ""
+        if mid and not force:
+            saved = study_mod.load_study(mid)
+            if saved:
+                self.session.module_study = {
+                    k: saved.get(k, "") for k in
+                    ("spine", "spine_ids", "understanding", "expansion", "eggs")}
+                self._e("system", f"── 这个模组之前已经研读过"
+                                  f"（{saved.get('updated_at', '')}，"
+                                  f"{saved.get('keeper', '')}），直接复用 ──")
+                self._e("study", self.session.module_study.get("understanding", ""),
+                        name=self.kp.display_name,
+                        meta={"spine_ids": self.session.module_study.get("spine_ids", []),
+                              "expansion": self.session.module_study.get("expansion", ""),
+                              "eggs": self.session.module_study.get("eggs", ""),
+                              "cached": True})
+                return self.session.module_study
+
         title = self.module.title if self.module else ""
         ids = [s.id for s in self.module.scenes] if self.module else []
         brief = self._module_brief(include_party=False)
@@ -434,6 +490,17 @@ class GameLoop:
                       "eggs": res.get("eggs", "")})
         if res.get("eggs"):
             self._e("system", "〔彩蛋已埋下，跑完才揭晓〕")
+        # 按模组存下来，下次开团直接复用
+        if mid:
+            try:
+                study_mod.save_study(
+                    mid, self.session.module_study,
+                    keeper=self._player_of(self.kp),
+                    model=self.kp.seat.get("model", ""),
+                    title=self.module.title if self.module else mid)
+                self._e("system", f"功课已存档，以后用这个模组开团会直接复用。")
+            except Exception as e:  # noqa: BLE001
+                self._e("system", f"功课存档失败（不影响这一局）：{e}")
         return self.session.module_study
 
     def _module_fulltext(self) -> str:
@@ -748,6 +815,7 @@ class GameLoop:
                 scene_text=scene.body if scene else "",
                 scene_title=scene.title if scene else "",
                 handouts=handouts,
+                time_block=self.session.clock.render() if self.session.clock else "",
             )
         except LLMError as e:
             self._e("system", f"守秘人开场失败：{e.message}")
@@ -759,8 +827,9 @@ class GameLoop:
         self._emit_kp(out)
 
         # 入戏锚定：每个 PL 先用自己的正式通道写一小段，作为它的第一条 assistant 历史
+        time_block = self.session.clock.render() if self.session.clock else ""
         for pl in self.pls:
-            anchor = pl.anchor(self.last_narr)
+            anchor = pl.anchor(self.last_narr, time_block)
             if anchor and (anchor.act or anchor.think):
                 self._e("act", anchor.act or "（入戏）", name=pl.display_name,
                         seat_id=pl.seat_id, meta={"anchor": True})
@@ -803,8 +872,15 @@ class GameLoop:
 
             self._e("system", f"── 第 {self.session.round} 轮 ──")
 
+            # 拨钟：这一轮从什么时候开始。两个阶段（PL / KP）共用同一份，
+            # 免得同一轮里两边看到的时间不一样。
+            time_block = self._tick_clock()
+            if self.session.clock is not None:
+                self._e("system", f"〔时间〕{self.session.clock.short()}",
+                        meta={"clock": self.session.clock.to_dict()})
+
             # ---- PL 阶段 ----
-            results = self._pl_phase()
+            results = self._pl_phase(time_block)
             if results is None:
                 return False
 
@@ -851,6 +927,7 @@ class GameLoop:
                 kp_out = self.kp.respond(
                     actions=self._round_publics, dice_lines=dice_lines,
                     scene_text=scene_text, engine_notes=notes, table_talk=table_talk,
+                    time_block=time_block,
                 )
             except LLMError as e:
                 self._e("system", f"守秘人回合失败：{e.message}")
@@ -909,7 +986,7 @@ class GameLoop:
 
     # ══════════════════════════════════════════════ PL 阶段
 
-    def _pl_phase(self) -> tuple[dict[str, ChannelOutput], list[str]] | None:
+    def _pl_phase(self, time_block: str = "") -> tuple[dict[str, ChannelOutput], list[str]] | None:
         """全体 PL 行动。探索轮互不可见当轮他人输出。"""
         narr = self.last_narr
         scene_id = self.session.scene_id
@@ -930,6 +1007,7 @@ class GameLoop:
                     dice_lines=seat_dice or None,
                     extra=extra,
                     unknown=self._unknown_for(pl),
+                    time_block=time_block,
                 )
                 return pl.seat_id, out, ""
             except LLMError as e:
@@ -1153,6 +1231,30 @@ class GameLoop:
         if kind == "note":
             self._e("system", f"守秘人备注：{d.arg(1)}")
             return []
+
+        # ---- 拨钟：故事里时间往前走（等了两小时、开车过去、一直熬到天亮）----
+        action, arg = clock_mod.parse_clock_directive(kind, target, payload)
+        if action and self.session.clock is not None:
+            c = self.session.clock
+            self._clock_dirty = True          # 这轮就别再叠默认推进了
+            before = c.short()
+            if action == "advance":
+                minutes = clock_mod.parse_duration(arg)
+                if minutes <= 0:
+                    return [f"你想拨钟但引擎没看懂「{arg}」。写法示例：advance 2h / advance 30m / advance 1d"]
+                if minutes > 60 * 24 * 365 * 5:
+                    minutes = 60 * 24 * 365 * 5
+                c.advance(minutes)
+            else:
+                abs_dt = clock_mod.parse_absolute(arg, c.dt)
+                if abs_dt is None:
+                    return [f"你想把时间设成「{arg}」但引擎没看懂。写法示例：time 10月5日 08:00"]
+                c.set_dt(abs_dt)
+            self._e("system", f"〔时间〕{before} → {c.short()}", meta={"clock": c.to_dict()})
+            if self.kp:
+                self.kp.note_engine_event(f"时间到了 {c.short()}", kind="event")
+            return [f"时间已经拨到 {c.date_cn()} {c.clock_cn()}。"
+                    f"（距离场过了 {c.elapsed_text()}）"]
 
         if kind == "advance_scene":
             sid = target.strip()

@@ -20,6 +20,7 @@
   <div class="topbar-actions">
     <button class="btn ghost" data-modal="modalRoster">🎭 名册与站位</button>
     <button class="btn ghost" data-modal="modalModule">📁 模组</button>
+    <button class="btn ghost" data-modal="modalStudy">📖 研读室</button>
     <button class="btn ghost" data-modal="modalPlayers">🧠 玩家档案</button>
     <button class="btn ghost" data-modal="modalRules">📖 规则</button>
     <button class="btn ghost" data-modal="modalSessions">💾 存档</button>
@@ -60,6 +61,7 @@
         </label>
         <div class="round-badge">第 <b id="roundNum">0</b> 轮</div>
       </div>
+      <div id="clockBadge" class="clock-badge" title="桌面上现在是什么时候"></div>
       <div id="jobHint" class="job-hint"></div>
     </section>
 
@@ -385,8 +387,55 @@
   </div>
 </div>
 
-<div id="toasts" class="toasts"></div>
+<!-- ══════════════════════════ 弹窗：研读室 ══════════════════════════ -->
+<div class="modal" id="modalStudy">
+  <div class="modal-box wide">
+    <header class="modal-head">
+      <h3>📖 研读室 · 桌上只有你和 KP</h3>
+      <button class="btn tiny ghost" data-close>✕</button>
+    </header>
+    <div class="modal-body">
+      <div class="notice">
+        这是个<b>单人小窗</b>：没有玩家，只有你和守秘人。
+        它会先把模组通读一遍、做一份功课，再给你一份<b>不藏着的</b>通读报告——
+        幕后真相、绕不过去的骨架、最容易翻车的地方、它自己想往哪儿加料，全摊开说。
+        因为这里没有玩家，它的保密义务不存在。
+        <br>· 读过的模组会存在 <code>data/studies/</code>，
+        以后拿同一个本开真局时它会<b>直接复用</b>，不用重读，省一次钱。
+        <br>· 觉得它读歪了，可以点「重读」丢掉旧记录再来一遍。
+      </div>
 
+      <div class="row-actions">
+        <label class="inline-field"><span>挑一个模组</span>
+          <select id="studyModuleSel"></select></label>
+        <button class="btn primary" id="btnRunStudy">📖 让 KP 读一遍</button>
+        <button class="btn" id="btnRereadStudy">↻ 重读（丢掉旧记录）</button>
+        <button class="btn" id="btnForgetStudy">🗑 忘掉这个本的研读</button>
+        <button class="btn" id="btnRefreshStudies">↻ 刷新</button>
+      </div>
+      <div id="studySaved" class="hint"></div>
+
+      <div id="studyReport" class="study-report empty">
+        还没读过。挑一个模组，点「让 KP 读一遍」。
+      </div>
+
+      <h4 class="section-h">有不懂的直接问它</h4>
+      <div id="studyTalk" class="study-talk"></div>
+      <div class="row-actions">
+        <input id="studyAskInput" type="text"
+               placeholder="例：第二章那个据点玩家不去会怎样？／哪个 NPC 最容易被我演崩？">
+        <button class="btn accent" id="btnStudyAsk">问</button>
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <span class="spacer"></span>
+      <button class="btn" id="btnStudyToGame">用这个模组开真局</button>
+      <button class="btn" data-close>关闭</button>
+    </footer>
+  </div>
+</div>
+
+<div id="toasts" class="toasts"></div>
 <script src="app.js"></script>
 </body>
 </html>

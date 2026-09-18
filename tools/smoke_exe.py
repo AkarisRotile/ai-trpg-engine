@@ -26,7 +26,11 @@ _CANDIDATES = [
     ROOT / f"{APP_NAME}.exe",
     ROOT / "dist" / APP_NAME / f"{APP_NAME}.exe",
 ]
-EXE = next((p for p in _CANDIDATES if p.exists()), _CANDIDATES[0])
+# 也可以直接指定测哪一份：smoke_exe.py "D:\某处\COC跑团引擎.exe"
+if len(sys.argv) > 1:
+    EXE = Path(sys.argv[1]).resolve()
+else:
+    EXE = next((p for p in _CANDIDATES if p.exists()), _CANDIDATES[0])
 
 
 def main() -> int:
@@ -78,6 +82,10 @@ def main() -> int:
             print(f"    · {t}")
     if result.get("data"):
         print(f"\n  引擎数据：{json.dumps(result['data'], ensure_ascii=False)}")
+        # 每个模组解析出几幕——顺便把乱格式（.doc/.docx/.xls/.xlsx）也验了：
+        # 把模组文件夹丢进 data\modules\ 再跑一次这个脚本，就能看到它能不能读。
+        for m in (result["data"].get("mods") or []):
+            print(f"    · 模组 {m}")
 
     # 数据目录必须落在 exe 同级，便携且升级不丢
     data_dir = EXE.parent / "data"

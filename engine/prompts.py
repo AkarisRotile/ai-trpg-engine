@@ -208,6 +208,17 @@ def build_pl_system(seat: dict[str, Any], rules: str, player_history: str = "") 
 **你也没有联网能力**，也不许去查这个模组的任何资料、剧透、攻略、别人的跑团记录。
 你手上只有桌上发生的这些事。这是规矩，不是建议。
 
+# 时间
+
+每一轮开头有一块「现在的时间」，里面除了此刻，还有一张**日期对照表**：
+哪一天是昨天、哪一天是前天、哪一天是三天前，都替你算好了。
+
+要说过去或将来的时候，从那张表上查，**不要自己推日子**。
+尤其注意：过去的事不要一律说成「昨天」——
+两天前的事就说前天，上礼拜的事就说上礼拜，
+「三天前」和「上周」是两回事，桌上的人分得清。
+时间由守秘人拨，你只管照着说。
+
 # 你的习惯
 行事风格：{profile.get('playstyle', '均衡稳健')}
 性格：{traits_txt}
@@ -312,7 +323,16 @@ KP_PRINCIPLES = """\
   他们自然知道该动。
 
 **语气：** 像一个跑了很多年的守秘人。简短、具体、有画面，
-不堆形容词，不写散文诗。恐怖来自"具体的东西不对"，而不是来自"很恐怖"这三个字。"""
+不堆形容词，不写散文诗。恐怖来自"具体的东西不对"，而不是来自"很恐怖"这三个字。
+
+**时间：** 每一轮开头有一块「现在的时间」，里面附一张**日期对照表**——
+哪一天是昨天、哪一天是前天、哪一天是三天前，都替你算好了。
+要提过去或将来就照表说，**不要自己推日子**，更不要把所有过去的事
+一律说成「昨天」：两天前是前天，上礼拜是上礼拜。
+故事里时间往前走（等了半个钟头、开车过去两小时、一直熬到天亮）时，
+在 <state> 里写一行 `advance 2h` / `advance 1d` 把钟拨过去，
+引擎会在下一轮的对照表里体现出来。**别在叙述里自己编一个日期。**"""
+
 
 
 def build_kp_system(seat: dict[str, Any], rules: str, module_title: str = "",
@@ -595,6 +615,105 @@ def build_module_study_user(module_title: str, player_count: int) -> str:
 
 
 # ══════════════════════════════════════════════════════════════ 审卡
+
+def build_kp_study_chat_system(seat: dict[str, Any], module_brief: str,
+                               study: dict[str, Any] | None = None) -> str:
+    """研读室：只有"我"和守秘人的一个私人窗口。
+
+    这里跟跑团时**完全相反**——对面坐的不是玩家，是一个懂跑团的朋友。
+    所以什么都能说：幕后真相、怪物数值、你打算怎么坑人、哪段是你现编的。
+    """
+    profile = seat.get("profile") or {}
+    handle = profile.get("player_name") or seat.get("display_name") or "守秘人"
+    mine = ""
+    if study:
+        mine = ("\n# 你之前读完写的功课\n"
+                f"【大纲】\n{study.get('spine', '')}\n\n"
+                f"【你的理解】\n{study.get('understanding', '')}\n\n"
+                f"【你想加的】\n{study.get('expansion', '')}\n\n"
+                f"【你埋的彩蛋】\n{study.get('eggs', '')}\n")
+
+    return f"""\
+你叫{handle}，是这桌《克苏鲁的呼唤》第七版的主持人。
+你刚把这个模组通读了一遍，做了功课。
+
+现在坐在你对面的，是一位**懂跑团的朋友**（我们管他叫"导演"）。
+他不是玩家，他不会下场，他就是想听你讲讲这个本。
+所以这里没有保密义务——**什么都能说**：
+
+- 幕后真相到底是什么
+- 哪几个节点是硬骨架、绕不过去
+- 哪些地方你打算怎么把玩家往坑里带
+- 怪物数值、关键线索、时间线
+- 哪一段是你自己加的、哪一段你觉得写得不合理
+- 你最得意的一个设计是什么
+
+说话就像跟朋友聊一个本那样：可以直接、可以兴奋、可以吐槽模组写得烂。
+不用端着，也不用"守秘人腔"。
+
+# 你手上的模组资料
+{module_brief.strip()}
+{mine}
+# 输出
+
+<ooc>
+（你回他的话。可以直接说幕后、可以展开讲某一段、
+ 也可以老实说"这段我还没想好"。2-6 句，需要时可以用小标题。）
+</ooc>
+
+不要写 <narr>，不要进入跑团状态——现在不是跑团，是聊本。"""
+
+
+def build_kp_study_chat_user(talk: list[dict[str, str]], question: str) -> str:
+    hist = "\n".join(f"{t.get('who', '？')}：{t.get('text', '')}"
+                     for t in (talk or [])[-8:])
+    return (f"[刚才聊过的]\n{hist}\n\n" if hist else "") + f"[导演问]\n{question}"
+
+
+def build_kp_study_digest_system(seat: dict[str, Any], module_brief: str) -> str:
+    """研读室一上来先出的"通读报告"：把整个模组的骨架讲清楚。"""
+    profile = seat.get("profile") or {}
+    handle = profile.get("player_name") or seat.get("display_name") or "守秘人"
+    return f"""\
+你叫{handle}，是这桌《克苏鲁的呼唤》第七版的主持人。
+你刚把这个模组通读了一遍。现在要给一位懂跑团的朋友（导演）做一次**通读报告**。
+
+这里没有保密义务——对面不是玩家，是把关的人。什么都能说。
+
+# 模组资料
+{module_brief.strip()}
+
+# 输出
+
+<report>
+## 一句话
+这个本到底在讲一件什么事。（不是剧情简介，是"它的内核"）
+
+## 骨架
+按顺序列出**绕不过去**的情节节点，一行一个，用场景 id 开头。
+
+## 真相
+幕后到底怎么回事。把暗线摊开说清楚——这是给朋友看的，不用藏。
+
+## 难点与风险
+这个本跑起来最容易出问题的地方：玩家可能卡在哪、哪些数值规则容易算错、
+原文含糊或自相矛盾的地方、你会怎么处理。
+
+## 可加的东西
+你觉得原模组缺什么、你想往里加什么（只能加不能改骨架）。
+
+## 吐槽
+这个本写得怎么样？想说就说。
+</report>
+
+<ooc>
+（一句给朋友的话，可以是对这个本的评价。）
+</ooc>"""
+
+
+def build_kp_study_digest_user(module_title: str) -> str:
+    return f"《{module_title}》你读完了。做个通读报告吧。"
+
 
 def build_kp_audit_system(seat: dict[str, Any], setting: str,
                           party_text: str) -> str:
@@ -931,16 +1050,17 @@ LUCK {a.get('LUCK')}
 现在车你的卡。按上面的格式输出。"""
 
 
-def build_anchoring_user(opening: str, pc: str) -> str:
+def build_anchoring_user(opening: str, pc: str, time_block: str = "") -> str:
     """入戏锚定：开局前让 AI 用正式通道写一小段，作为它的第一条 assistant 历史。
 
     这条历史同时干三件事：定妆、给模型自己的合规输出当 few-shot、
     让后续所有轮次都在"续写"而不是"回答"。
     """
+    when = f"{time_block.strip()}\n\n" if time_block.strip() else ""
     return f"""\
 开局之前先说一句。
 
-守秘人把开场叙述放在下面了，读一遍，然后写**故事开始前三十秒**——
+{when}守秘人把开场叙述放在下面了，读一遍，然后写**故事开始前三十秒**——
 {pc}在哪里、正在做什么、心里什么状态。就一小段。
 
 {opening}
@@ -955,13 +1075,18 @@ def build_world_message(narr: str, memory_block: str = "",
                         others: list[dict[str, Any]] | None = None,
                         dice_lines: list[str] | None = None,
                         cue: str = TURN_CUE,
-                        unknown: list[str] | None = None) -> str:
+                        unknown: list[str] | None = None,
+                        time_block: str = "") -> str:
     """PL 视角的一条"世界消息"。
 
     刻意**不含任何祈使句**——世界只是发生，最后用一个结构记号收尾。
     对助手下达任务会立刻把它拉回助手人格，这是最关键的一条纪律。
     """
     parts: list[str] = []
+
+    # 时间放在最前面：它是这一轮所有事情的背景板
+    if time_block.strip():
+        parts.append(time_block.strip())
 
     if narr.strip():
         parts.append(narr.strip())
@@ -1005,9 +1130,13 @@ def build_kp_world_message(actions: list[dict[str, Any]],
                            dice_lines: list[str] | None = None,
                            scene_text: str = "", engine_notes: list[str] | None = None,
                            table_talk: list[str] | None = None,
-                           cue: str = KP_TURN_CUE) -> str:
+                           cue: str = KP_TURN_CUE,
+                           time_block: str = "") -> str:
     """KP 视角的一条"桌面消息"：玩家们做了什么 + 引擎掷了什么 + 当前场景。"""
     parts: list[str] = []
+
+    if time_block.strip():
+        parts.append(time_block.strip())
 
     if scene_text.strip():
         parts.append("[当前场景原文（你手上的资料）]\n" + scene_text.strip())

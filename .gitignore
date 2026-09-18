@@ -9,6 +9,9 @@ data/roster.yaml
 data/rules/glossary_extra.yaml
 data/rules/full/
 data/.webview/
+data/.webview-smoke/
+data/.ui-version
+data/studies/
 data/sheet_map.txt
 data/sheet_person.txt
 data/defined_names.txt

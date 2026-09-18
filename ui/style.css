@@ -110,6 +110,12 @@ body {
 .round-badge { font-size: 12px; color: var(--fg-dim); font-family: var(--mono); }
 .round-badge b { color: var(--accent); font-size: 14px; }
 .job-hint { margin-top: 8px; font-size: 11.5px; color: var(--warn); min-height: 16px; }
+.clock-badge {
+  margin-top: 8px; font-family: var(--mono); font-size: 11.5px; color: #cbb887;
+  background: #1a1710; border: 1px solid #3d3520; border-radius: 5px;
+  padding: 5px 8px; min-height: 15px; white-space: pre-wrap; cursor: help;
+}
+.clock-badge:empty { display: none; }
 .btn.big { padding: 11px 12px; font-size: 14px; font-weight: 600; }
 .current-game {
   margin-top: 9px; padding: 8px 10px; background: var(--bg-3);
@@ -475,6 +481,49 @@ label.inline-field input { width: 78px; }
 }
 .session-row .id { font-family: var(--mono); font-size: 11.5px; color: var(--fg-dim); }
 .session-row .m { color: var(--fg-faint); font-size: 11.5px; }
+
+/* ── 研读室 ── */
+.study-report {
+  background: #17140d; border: 1px solid #3d3520; border-left: 3px solid #e0c98a;
+  border-radius: 6px; padding: 14px 16px; font-size: 12.5px; line-height: 1.85;
+  color: #ded3b4; white-space: pre-wrap; max-height: 340px; overflow: auto;
+  margin-bottom: 6px;
+}
+.study-report.empty {
+  color: var(--fg-faint); text-align: center; padding: 40px 20px;
+  background: var(--bg-3); border-color: var(--line); border-left-color: var(--line);
+}
+.study-talk { display: grid; gap: 6px; max-height: 280px; overflow-y: auto; margin-bottom: 10px; }
+.study-talk .empty { padding: 18px; }
+.study-line {
+  display: flex; gap: 10px; background: var(--bg-3); border: 1px solid var(--line);
+  border-left: 3px solid var(--c-secret); border-radius: 6px; padding: 8px 12px;
+  font-size: 12.5px; line-height: 1.75;
+}
+.study-line.me { border-left-color: var(--c-director); background: #1a1720; }
+.study-line .who {
+  flex: none; width: 74px; color: var(--c-secret); font-size: 11.5px; font-weight: 600;
+}
+.study-line.me .who { color: var(--c-director); }
+.study-line .said { color: var(--fg-dim); white-space: pre-wrap; }
+.entry.study_report {
+  border-left: 3px solid #e0c98a; background: #17140d; padding-left: 12px;
+}
+.entry.study_report .who { color: #e0c98a; font-size: 13px; }
+.entry.study_report pre {
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px;
+  padding: 10px 12px; font-size: 12px; line-height: 1.8; white-space: pre-wrap;
+  max-height: 420px; overflow: auto; margin: 8px 0 0;
+}
+.entry.study_talk { border-left: 3px solid #4a3f2c; padding-left: 12px; }
+.entry.study_talk .who { color: #e0c98a; }
+.entry.study_talk .body { color: #ded3b4; font-size: 13px; }
+
+/* 研读室开着的时候，跑团用的按钮不该显得可用 */
+body.study-mode #btnPrepare,
+body.study-mode #btnStart,
+body.study-mode #btnAuto,
+body.study-mode #btnStep { opacity: .45; }
 
 /* ── 提示条 ── */
 .toasts {

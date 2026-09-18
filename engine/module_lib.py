@@ -53,6 +53,7 @@ class Module:
     system: str = "COC7"
     players: str = ""
     era: str = ""            # 时代背景，例如「1925 年 · 美国马萨诸塞州」
+    start_time: str = ""     # 开场时刻，例如「1925-10-03 20:00」
     summary: str = ""
     premise: str = ""
     truth: str = ""
@@ -90,6 +91,7 @@ class Module:
             "system": self.system,
             "players": self.players,
             "era": self.era,
+            "start_time": self.start_time,
             "summary": self.summary,
             "premise": self.premise,
             "has_truth": bool(self.truth.strip()),
@@ -208,6 +210,8 @@ def load_module(module_id: str) -> Module | None:
             m.players = str(pl)
             # 时代背景：审卡就靠它判断"这个东西在这地方合不合理"
             m.era = str(info.get("era") or info.get("setting") or info.get("time") or "")
+            # 开场时刻：引擎拿它起点钟，之后每轮给 AI 一张"哪天是哪天"的对照表
+            m.start_time = str(info.get("start_time") or info.get("start_at") or "")
             m.summary = str(info.get("summary") or info.get("description") or "")
             m.premise = str(info.get("premise") or info.get("hook") or "")
             start = str(info.get("start_scene") or "")
@@ -253,7 +257,7 @@ def load_module(module_id: str) -> Module | None:
             m.scenes.append(Scene(id=p.stem, title=title, body=body,
                                   order=i, path=str(p)))
     if not m.scenes:
-        # 退路：单文件模组
+        # 退路一：单文件模组
         cand = [p for p in root.glob("*.md")
                 if not re.search(r"真相|secret|truth|kp|keeper", p.name, re.I)]
         cand.sort(key=lambda p: (0 if re.search(r"模组|剧本|module|scenario", p.name) else 1,
@@ -262,6 +266,34 @@ def load_module(module_id: str) -> Module | None:
             text = _read(cand[0])
             m.scenes = _split_by_heading(text, "scene")
             m.warnings.append(f"未找到 scenes/ 目录，已把 {cand[0].name} 按标题切分为场景。")
+
+    # 退路二：多格式扫描。
+    # 现实里从网上下来的模组经常长这样——
+    #   某某模组/ 本体.doc  第一章/地图.png  第二章/怪物资料.docx  时间线.xls
+    # 一个 .md 都没有。结构化布局在这种文件夹面前等于瞎了，
+    # 所以这里回落到"把整个文件夹按格式读一遍"。
+    scan: dict[str, Any] | None = None
+    if not m.scenes:
+        from . import docread
+        scan = docread.scan_folder(root)
+        if scan["text"].strip():
+            m.scenes = _split_scanned(scan["text"])
+            m.warnings.append(
+                f"这不是标准模组结构：扫到 {scan['files']} 个文件，"
+                f"按内容切成 {len(m.scenes)} 幕。"
+                f"（建议整理成 scenes/ + secret_truth.md，守秘人会跑得更准。）")
+        else:
+            m.warnings.append("这个文件夹里没有能读出的文字。")
+        for w in scan.get("warnings", []):
+            m.warnings.append(w)
+        if not m.truth and scan["text"].strip():
+            m.truth = scan["text"]
+            m.warnings.append("没有单独的幕后真相文件，已把整包内容当作守秘人资料。")
+        if scan.get("assets"):
+            m.handouts = [Handout(id=Path(a).stem, title=Path(a).name, body="",
+                                  path=str(root / a)) for a in scan["assets"]]
+            m.warnings.append(f"文件夹里有 {len(scan['assets'])} 个图片素材，"
+                              f"已登记为 handout（内容要你自己看）。")
 
     # --- Handout ---
     hdir = root / "handouts"
@@ -327,6 +359,68 @@ def _split_by_length(text: str, prefix: str, chunks: int = 4) -> list[Scene]:
             out.append(Scene(id=f"{prefix}_{i + 1:02d}",
                              title=f"第 {i + 1} 段", body=part, order=i + 1))
     return out
+
+
+def _split_scanned(text: str, min_chars: int = 1400,
+                   max_scenes: int = 48) -> list[Scene]:
+    """把"扫出来的"整包文本切成幕。
+
+    难点在于**切多碎**。启发式扫出来的文本里，短行到处都是
+    （"提取码：7naa"、"5。大失败固定为96"），按每个 `##` 切会切出三百多幕，
+    KP 根本没法用。所以策略是：**先切，再合并**。
+
+      1. 找候选切点：`## ` 小标题（docx 标题样式 / .doc 里像标题的短行）
+         找不到再按 `===== 文件名 =====` 分（一个文件一幕也很合理）
+      2. 合并：相邻段不足 min_chars 就并进上一幕——
+         这一步会把"提取码：7naa"这种伪标题自然吸收掉
+      3. 还是超过 max_scenes 就按长度继续并
+    """
+    marks = list(re.finditer(r"^##\s+(.+?)\s*$", text, re.M))
+    if len(marks) < 2:
+        marks = list(re.finditer(r"^=====\s*(.+?)\s*=====\s*$", text, re.M))
+
+    if len(marks) >= 2:
+        chunks: list[tuple[str, str]] = []
+        for i, mk in enumerate(marks):
+            end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
+            body = text[mk.end():end].strip()
+            name = mk.group(1).strip()
+            if Path(name).suffix:
+                name = Path(name).stem
+            chunks.append((name[:36], body))
+        # 开头如果还有内容（第一个标题之前的），单独放一幕
+        head = text[:marks[0].start()].strip()
+        if len(head) >= 200:
+            chunks.insert(0, ("开场材料", head))
+    else:
+        chunks = [("", text.strip())]
+
+    # ---- 合并：不足 min_chars 的并进上一幕 ----
+    merged: list[tuple[str, str]] = []
+    for name, body in chunks:
+        if not body:
+            continue
+        if merged and len(merged[-1][1]) < min_chars:
+            prev_name, prev_body = merged[-1]
+            merged[-1] = (prev_name, prev_body + "\n\n" + (f"## {name}\n" if name else "") + body)
+        else:
+            merged.append((name, body))
+
+    # ---- 还是太多就按长度再并 ----
+    while len(merged) > max_scenes:
+        size = max(2, len(merged) // max_scenes + 1)
+        merged = [(merged[i][0],
+                   "\n\n".join(b for _, b in merged[i:i + size]))
+                  for i in range(0, len(merged), size)]
+
+    out: list[Scene] = []
+    for i, (name, body) in enumerate(merged):
+        if not body.strip():
+            continue
+        title = name or (f"第 {i + 1} 段")
+        out.append(Scene(id=f"scene_{i + 1:02d}", title=title,
+                         body=body, order=i + 1))
+    return out or _split_by_length(text, "scene", chunks=4)
 
 
 def scan_modules() -> list[dict[str, Any]]:

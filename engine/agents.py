@@ -82,7 +82,17 @@ class Directive:
     args: list[str] = field(default_factory=list)
 
     def arg(self, i: int, default: str = "") -> str:
-        return self.args[i] if i < len(self.args) else default
+        """第 i 个参数，**从 1 开始**。
+
+        解析器把一条 `<state>` 拆成 `[目标, 内容]`，而所有调用点写的都是
+        「arg(1) = 目标，arg(2) = 内容」。这里以前是 0-based，于是 whisper、
+        grant_handout、check、damage、san、advance_scene、note 全部**静默取错**
+        参数：私聊发不出去、handout 发不出去、场景推不动、守秘人主动发起的
+        检定从来不执行、备注永远是空的——而且只在日志里留一句"找不到目标"。
+
+        别改回 0-based。
+        """
+        return self.args[i - 1] if 1 <= i <= len(self.args) else default
 
 
 @dataclass
@@ -263,7 +273,7 @@ def parse_kp_output(text: str) -> ChannelOutput:
         if not line or line.startswith("#"):
             continue
         parts = line.split(None, 1)
-        kind = parts[0].strip().lower()
+        kind = parts[0].strip().lower().rstrip(":：")
         rest = parts[1].strip() if len(parts) > 1 else ""
         if kind == "note":
             out.directives.append(Directive("note", [rest]))
@@ -676,7 +686,7 @@ class PLAgent(BaseAgent):
 
     # -------------------------------------------------- 入戏锚定
 
-    def anchor(self, opening: str) -> ChannelOutput | None:
+    def anchor(self, opening: str, time_block: str = "") -> ChannelOutput | None:
         """开局前让 AI 用自己的正式通道写一小段，作为它的第一条 assistant 历史。
 
         这一条历史同时干三件事：定妆、给模型自己的合规输出当 few-shot、
@@ -684,7 +694,8 @@ class PLAgent(BaseAgent):
         """
         pc = (self.seat.get("character") or {}).get("name", "你的调查员")
         trial = list(self.messages) + [
-            {"role": "user", "content": prompts.build_anchoring_user(opening, pc)}
+            {"role": "user",
+             "content": prompts.build_anchoring_user(opening, pc, time_block)}
         ]
         try:
             res = self._call(trial, phase="anchor")
@@ -710,7 +721,8 @@ class PLAgent(BaseAgent):
 
     def act(self, *, narr: str, scene_id: str = "", others: list[dict[str, Any]] | None = None,
             dice_lines: list[str] | None = None, engine_notes: list[str] | None = None,
-            extra: str = "", unknown: list[str] | None = None) -> ChannelOutput:
+            extra: str = "", unknown: list[str] | None = None,
+            time_block: str = "") -> ChannelOutput:
         mem_block = self.memory.render_for_prompt(
             scene_id=scene_id, query=narr,
             topk=int(self.options.get("memory_topk", 10)),
@@ -737,7 +749,7 @@ class PLAgent(BaseAgent):
 
         world = prompts.build_world_message(
             narr=narr, memory_block=mem_block, others=others, dice_lines=dice_lines,
-            unknown=unknown,
+            unknown=unknown, time_block=time_block,
         )
         self.messages.append({"role": "user", "content": world})
 
@@ -1004,10 +1016,50 @@ class KPAgent(BaseAgent):
                 "ooc": (split_tags(res.text).get("ooc") or "").strip(),
                 "raw": res.text}
 
+    def study_report(self, module_brief: str, module_title: str) -> dict[str, Any]:
+        """研读室：一上来先出一份**通读报告**（给导演看的，不用藏）。"""
+        try:
+            res = self._call([
+                {"role": "system",
+                 "content": prompts.build_kp_study_digest_system(self.seat, module_brief)},
+                {"role": "user",
+                 "content": prompts.build_kp_study_digest_user(module_title)},
+            ], phase="study_room")
+        except LLMError as e:
+            self.stats.errors += 1
+            self.stats.last_error = e.message
+            return {"ok": False, "error": e.message, "report": "", "ooc": ""}
+        tags = split_tags(res.text)
+        report = _tagged(res.text, "report")
+        return {"ok": bool(report), "report": report,
+                "ooc": (tags.get("ooc") or "").strip(), "raw": res.text}
+
+    def study_answer(self, module_brief: str, study: dict[str, Any] | None,
+                     talk: list[dict[str, str]], question: str) -> dict[str, Any]:
+        """研读室：回答导演关于这个模组的追问。"""
+        try:
+            res = self._call([
+                {"role": "system",
+                 "content": prompts.build_kp_study_chat_system(
+                     self.seat, module_brief, study)},
+                {"role": "user",
+                 "content": prompts.build_kp_study_chat_user(talk, question)},
+            ], phase="study_room")
+        except LLMError as e:
+            self.stats.errors += 1
+            self.stats.last_error = e.message
+            return {"ok": False, "error": e.message, "answer": ""}
+        tags = split_tags(res.text)
+        ans = (tags.get("ooc") or "").strip() or res.text.strip()
+        return {"ok": True, "answer": ans, "raw": res.text}
+
     def opening(self, scene_text: str = "", scene_title: str = "",
-                handouts: list[str] | None = None) -> ChannelOutput:
+                handouts: list[str] | None = None,
+                time_block: str = "") -> ChannelOutput:
         """开场。模组情报已在 system 里（享受前缀缓存），这里只交代开场这一幕。"""
         parts = ["[现在开始]"]
+        if time_block.strip():
+            parts.append(time_block.strip())
         if scene_title:
             parts.append(f"开场场景：{scene_title}")
         if scene_text.strip():
@@ -1029,10 +1081,11 @@ class KPAgent(BaseAgent):
 
     def respond(self, *, actions: list[dict[str, Any]], dice_lines: list[str] | None = None,
                 scene_text: str = "", engine_notes: list[str] | None = None,
-                table_talk: list[str] | None = None) -> ChannelOutput:
+                table_talk: list[str] | None = None,
+                time_block: str = "") -> ChannelOutput:
         world = prompts.build_kp_world_message(
             actions=actions, dice_lines=dice_lines, scene_text=scene_text,
-            engine_notes=engine_notes, table_talk=table_talk,
+            engine_notes=engine_notes, table_talk=table_talk, time_block=time_block,
         )
         # 守秘人同样按术语触发补课——它要说"困难成功""临时性疯狂"这类词时更该用准
         blob = "\n".join([
@@ -1055,7 +1108,7 @@ class KPAgent(BaseAgent):
         return out
 
     def note_engine_event(self, text: str, kind: str = "event", scene: str = "") -> None:
-        self.memory.add(kind, text, scene=scene)
+        self.memory.add(kind, text, scene=scene, when=self.memory.now)
 
     def save_memory(self) -> None:
         self.memory.save(self.session_id)

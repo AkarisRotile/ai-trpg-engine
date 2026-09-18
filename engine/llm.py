@@ -411,6 +411,8 @@ class MockClient(BaseClient):
             text = self._ocr()
         elif phase == "study":
             text = self._study(system)
+        elif phase == "study_room":
+            text = self._study_room(system)
         elif phase == "audit":
             text = self._audit(system)
         elif phase == "defend":
@@ -449,6 +451,8 @@ class MockClient(BaseClient):
     def _detect_phase(system: str, user: str) -> str:
         if "散场" in system and "player_update" in system:
             return "retro"
+        if "通读报告" in system or "是聊本" in system:
+            return "study_room"
         if "你先做功课" in system:
             return "study"
         if "现在轮到你**审卡**" in system:
@@ -610,6 +614,42 @@ class MockClient(BaseClient):
 
 本页右下角有一枚印章，已模糊不可辨。
 其余段落完整。"""
+
+    # -------------------------------------------------- 研读室
+
+    def _study_room(self, system: str) -> str:
+        """离线模式的通读报告 / 追问回答。"""
+        if "<report>" in system:
+            ids = re.findall(r"scene_\d+", system)[:6]
+            spine = "\n".join(f"{i}. {s} —— 第 {i} 幕" for i, s in enumerate(ids, 1))
+            return f"""<report>
+## 一句话
+这是一个"被封住的东西在用别人的手给自己开门"的故事。
+
+## 骨架
+{spine or '（这个模组没有分场景）'}
+
+## 真相
+屋主从缅甸带回来的那尊小像本身没有意识，但它会让靠近它的人
+最深的恐惧获得形状。管家把它锁进了地下室，然后自己也没敢走。
+
+## 难点与风险
+- 玩家很容易卡在门厅不敢上楼，需要一点动静把他们顶上去
+- 理智损失的表达式原文写得不统一，注意别算错
+- 原文对地下室的描述前后有出入，我按前面那份为准
+
+## 可加的东西
+[加] 门厅那面照不出人影的镜子
+[加] 管家养的猫，会跟着某一个调查员走
+
+## 吐槽
+骨架挺扎实，但战斗数值给得偏保守，后半段容易变成走过场。
+</report>
+<ooc>
+（这本能跑，就是中段得我自己加点料。）
+</ooc>"""
+        return ("<ooc>\n（这个我通读的时候留意到了——原文写得很含糊，"
+                "我打算按「他自己也没敢下去」这条线来带。你想我再展开哪一段？）\n</ooc>")
 
     # -------------------------------------------------- 审卡
 
