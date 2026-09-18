@@ -204,7 +204,7 @@ class App:
         kp_name = labels.get("kp", kp_player_id)
         pl_names = [labels.get(s["seat_id"], "") for s in self._seat_states()
                     if s["kind"] == "PL"]
-        self._sys(f"站位已调整 —— 守秘人：{kp_name}；玩家：{'、'.join(pl_names)}")
+        self._sys(f"站位已调整，守秘人：{kp_name}；玩家：{'、'.join(pl_names)}")
         return {"ok": True, "config": cfgmod.public_config(self.cfg),
                 "roster": self.get_roster()}
 
@@ -452,7 +452,7 @@ class App:
                       f"（缓存命中 {res.from_cache} 页）")
             self._sys(f"模组已生成：{root}")
             self._sys("建议打开 module_info.yaml 补上 era（时代背景）和 players"
-                      "——守秘人审卡时会用到 era。")
+                      "，守秘人审卡时会用到 era。")
 
         self._run_async(job, "ocr")
         return {"ok": True, "message": "OCR 任务已启动"}

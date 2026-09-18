@@ -501,7 +501,7 @@ class MemoryCard:
             #   那正是"要用 <recall> 去捞"的东西。
             #   时间戳是例外：没有它，模型会把三天前听来的事说成"刚才"。
             stamp = f"（{n.when}）" if n.when else ""
-            lines.append(f"{mark} {n.title()}{stamp}" + (f" —— {one}" if one else ""))
+            lines.append(f"{mark} {n.title()}{stamp}" + (f"，{one}" if one else ""))
             rels = self._relations(n, live)
             if rels:
                 lines.append("    " + "；".join(rels))
@@ -537,7 +537,7 @@ class MemoryCard:
         parts: list[str] = ["【你想起来的事】"]
         for d in details:
             if not d.get("ok"):
-                parts.append(f"「{d['term']}」—— 你使劲想，但脑子里一片空白。")
+                parts.append(f"「{d['term']}」，你使劲想，但脑子里一片空白。")
                 continue
             blk = [f"▸ {d['label']}（{NODE_STATES.get(d['state'], d['state'])}）"]
             if d.get("when"):

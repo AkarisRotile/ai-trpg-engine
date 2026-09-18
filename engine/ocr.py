@@ -347,7 +347,7 @@ def build_module_from_ocr(pdf: Path, text: str, module_id: str = "",
         "era": "",
         "players": "",
         "summary": f"（由扫描版 PDF 自动识别生成：{pdf.name}，共 {len(parts)} 幕）\n"
-                   f"建议手工补一下 era（时代背景）和 players（推荐人数）——"
+                   f"建议手工补一下 era（时代背景）和 players（推荐人数），"
                    f"守秘人审卡时会用到 era。",
         "source_pdf": pdf.name,
         "ocr": True,

@@ -142,7 +142,7 @@ class GlossaryInjector:
             if len(picked) >= limit:
                 break
             self.seen.add(term)
-            picked.append(f"· 「{term}」——{self.terms[term]}")
+            picked.append(f"· 「{term}」，{self.terms[term]}")
         return picked
 
     def render(self, *texts: str, max_per_turn: int | None = None) -> str:

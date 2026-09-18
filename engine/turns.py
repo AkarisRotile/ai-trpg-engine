@@ -581,16 +581,16 @@ class GameLoop:
             if self.module.summary:
                 parts.append(f"[模组简介（这段是公开的，玩家也看得到）]\n{self.module.summary}")
             if self.module.truth:
-                parts.append(f"[幕后真相 —— 只有你能看]\n{_clip(self.module.truth, 7000)}")
+                parts.append(f"[幕后真相，只有你能看]\n{_clip(self.module.truth, 7000)}")
             if self.module.players:
                 parts.append(f"[推荐人数] {self.module.players}")
-            outline = "\n".join(f"  {s['order']}. {s['id']} —— {s['title']}"
+            outline = "\n".join(f"  {s['order']}. {s['id']}，{s['title']}"
                                 for s in self.module.outline())
             if outline:
                 parts.append("[场景目录（用 advance_scene 切换，只能用下面这些 id）]\n" + outline)
             if self.module.handouts:
                 parts.append("[handout 文件目录（用 grant_handout 发放）]\n"
-                             + "\n".join(f"  {h.id} —— {h.title}" for h in self.module.handouts))
+                             + "\n".join(f"  {h.id}，{h.title}" for h in self.module.handouts))
         if self.session.premise:
             parts.append(f"[本局设定]\n{self.session.premise}")
         if self.session.chargen_briefing:
@@ -598,7 +598,7 @@ class GameLoop:
                          + self.session.chargen_briefing)
         st = self.session.module_study or {}
         if st:
-            parts.append("[你开局前做的功课 —— 这是你自己的东西，照着它跑]\n"
+            parts.append("[你开局前做的功课，这是你自己的东西，照着它跑]\n"
                          f"大纲（不能偏离）：\n{st.get('spine', '')}\n"
                          f"你的理解：\n{st.get('understanding', '')}\n"
                          f"你要加的东西：\n{st.get('expansion', '')}\n"
@@ -606,7 +606,7 @@ class GameLoop:
         if include_party and self.pls:
             party = "\n".join(
                 f"  · {pl.display_name}（{pl.seat.get('character', {}).get('occupation', '?')}）"
-                f"—— 玩家叫 {pl.seat.get('profile', {}).get('player_name', '?')}"
+                f"，玩家叫 {pl.seat.get('profile', {}).get('player_name', '?')}"
                 for pl in self.pls)
             parts.append(f"[本桌的调查员]\n{party}")
             backs = []
@@ -1143,7 +1143,7 @@ class GameLoop:
             if not other:
                 continue
             for label in labels[-2:]:
-                out.append(f"{other.display_name} 私下收到了「{label}」——"
+                out.append(f"{other.display_name} 私下收到了「{label}」，"
                            f"你只看见守秘人把东西递了过去，没看到内容。")
 
         mine = (pl.memory.situation.get("current_location") or "").strip()
@@ -1152,7 +1152,7 @@ class GameLoop:
                 continue
             loc = (other.memory.situation.get("current_location") or "").strip()
             if loc and loc != mine:
-                out.append(f"{other.display_name} 现在在{loc}，不在你视线里——"
+                out.append(f"{other.display_name} 现在在{loc}，不在你视线里，"
                            f"除非他喊你、或者你自己过去，否则你不知道他看见了什么。")
         return out[:5]
 
@@ -1585,7 +1585,7 @@ def _session_digest(session: Session, budget: int = 2600) -> str:
         elif t == "dice":
             lines.append("🎲 " + text[:120])
         elif t == "scene":
-            lines.append(f"—— 场景：{text} ——")
+            lines.append(f"〔场景〕{text}")
     blob = "\n".join(lines)
     if len(blob) > budget:
         blob = "…（前略）\n" + blob[-budget:]

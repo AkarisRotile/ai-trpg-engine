@@ -21,7 +21,7 @@ from . import chargen, glossary as glossary_mod, memory as memory_mod, prompts
 from . import player_memory
 from . import rules as rules_mod
 from .llm import BaseClient, LLMError, LLMResult, make_client
-from .linter import KP_CHANNELS, LintReport, lint
+from .linter import KP_CHANNELS, PL_CHANNELS, LintReport, lint
 
 TAG_RE = re.compile(
     r"<(think|act|ooc|mem|narr|secret|state|roll|recall|brief|sheet)>(.*?)(?:</\1>|$)",
@@ -293,6 +293,39 @@ def parse_kp_output(text: str, *, do_lint: bool = True) -> ChannelOutput:
 
 
 # ══════════════════════════════════════════════════════════════ 座位运行时
+
+def chatter_with_sentinel(agent: Any, msgs: list[dict[str, Any]],
+                          channels: tuple[str, ...]) -> str:
+    """守秘人插一句话时的清洗（车卡桌边用）。
+
+    以前这一整段是漏的：`PLAgent.chargen_chat` 和 `KPAgent.chargen_chat`
+    都直接 `split_tags` 取 <ooc> 就交出去了，破折号、「你们呢」、
+    摆依据全都不拦。守秘人那句带破折号的场面话就是这么发到桌上的。
+
+    命中就静默重写一次，还脏就退回空串——车卡桌边少一句比脏一句好。
+    """
+    res = agent._call(msgs, phase="chargen_chat")
+    text = (split_tags(res.text).get("ooc") or "").strip()
+    rep = lint(text, channels=channels)
+    if not rep.dirty:
+        return text
+
+    agent.stats.repairs += 1
+    try:
+        res2 = agent._call(
+            list(msgs) + [
+                {"role": "assistant", "content": res.text},
+                {"role": "user", "content": prompts.build_repair_message(
+                    rep.reason_text(), res.text)},
+            ],
+            phase="chargen_chat")
+    except LLMError:
+        return ""
+    text2 = (split_tags(res2.text).get("ooc") or "").strip()
+    if lint(text2, channels=channels).dirty:
+        return ""
+    return text2
+
 
 @dataclass
 class SeatStats:
@@ -597,8 +630,28 @@ class PLAgent(BaseAgent):
             self.stats.last_error = e.message
             return {"ok": False, "error": e.message, "pitch": "", "ooc": ""}
         tags = split_tags(res.text)
-        return {"ok": True, "pitch": (tags.get("pitch") or "").strip(),
-                "ooc": (tags.get("ooc") or "").strip(), "raw": res.text}
+        pitch = (tags.get("pitch") or "").strip()
+        ooc = (tags.get("ooc") or "").strip()
+
+        # 车卡桌边以前整段不过哨兵：破折号、「你们呢」、摆依据都能摆到桌上。
+        # 这里补上，命中就静默重写一次，还脏就这一句不说。
+        rep = lint(ooc, channels=PL_CHANNELS)
+        if rep.dirty:
+            self.stats.repairs += 1
+            try:
+                res2 = self._call(
+                    msgs + [
+                        {"role": "assistant", "content": res.text},
+                        {"role": "user", "content": prompts.build_repair_message(
+                            rep.reason_text(), res.text)},
+                    ],
+                    phase="chargen_chat")
+                ooc2 = (split_tags(res2.text).get("ooc") or "").strip()
+                ooc = "" if lint(ooc2, channels=PL_CHANNELS).dirty else ooc2
+            except LLMError:
+                ooc = ""
+
+        return {"ok": True, "pitch": pitch, "ooc": ooc, "raw": res.text}
 
     def chargen_pitch(self, briefing: str, attrs: dict[str, int],
                       method: str = "roll",
@@ -1033,12 +1086,12 @@ class KPAgent(BaseAgent):
             {"role": "user", "content": prompts.build_kp_chargen_chat_user(chatter)},
         ]
         try:
-            res = self._call(msgs, phase="chargen_chat")
+            ooc = chatter_with_sentinel(self, msgs, KP_CHANNELS)
         except LLMError as e:
             self.stats.errors += 1
             self.stats.last_error = e.message
             return {"ok": False, "error": e.message, "ooc": ""}
-        return {"ok": True, "ooc": (split_tags(res.text).get("ooc") or "").strip()}
+        return {"ok": True, "ooc": ooc}
 
     def study_module(self, module_brief: str, roster_block: str,
                      scene_ids: list[str], module_title: str,
