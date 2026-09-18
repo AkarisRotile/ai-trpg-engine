@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 跑团引擎 · COC 第七版</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ══════════════════════════ 顶栏 ══════════════════════════ -->
+<header class="topbar">
+  <div class="brand">
+    <span class="mark">COC</span>
+    <span class="brand-text">
+      <b>AI 跑团引擎</b>
+      <em id="sessionLabel">尚未建立会话</em>
+    </span>
+  </div>
+  <div class="topbar-actions">
+    <button class="btn ghost" data-modal="modalRoster">🎭 名册与站位</button>
+    <button class="btn ghost" data-modal="modalModule">📁 模组</button>
+    <button class="btn ghost" data-modal="modalPlayers">🧠 玩家档案</button>
+    <button class="btn ghost" data-modal="modalRules">📖 规则</button>
+    <button class="btn ghost" data-modal="modalSessions">💾 存档</button>
+    <button class="btn ghost" data-modal="modalSettings">⚙️ 设置</button>
+  </div>
+</header>
+
+<!-- ══════════════════════════ 主体 ══════════════════════════ -->
+<main class="layout">
+
+  <!-- ── 左栏：席位与控制台 ── -->
+  <aside class="pane pane-left">
+    <section class="block">
+      <h2 class="block-title">席位</h2>
+      <div id="seatList" class="seat-list"></div>
+    </section>
+
+    <section class="block">
+      <h2 class="block-title">开团</h2>
+      <button class="btn accent wide big" id="btnNewGame">🎬 开新团</button>
+      <div id="currentGame" class="current-game">还没有团。点上面开一个。</div>
+    </section>
+
+    <section class="block">
+      <h2 class="block-title">推进</h2>
+      <div class="control-grid">
+        <button class="btn primary wide" id="btnPrepare">① 车卡</button>
+        <button class="btn primary wide" id="btnStart">② 开局</button>
+        <button class="btn accent wide" id="btnAuto">▶ 自动推进</button>
+        <button class="btn wide" id="btnStep">→ 单步</button>
+        <button class="btn danger wide" id="btnStop">■ 停止</button>
+        <button class="btn wide" id="btnFinish">散场复盘</button>
+      </div>
+      <div class="control-meta">
+        <label class="inline-field">
+          <span>推进轮数</span>
+          <input type="number" id="autoRounds" value="5" min="1" max="200">
+        </label>
+        <div class="round-badge">第 <b id="roundNum">0</b> 轮</div>
+      </div>
+      <div id="jobHint" class="job-hint"></div>
+    </section>
+
+    <section class="block grow">
+      <h2 class="block-title">显示过滤</h2>
+      <div id="filters" class="filters"></div>
+    </section>
+  </aside>
+
+  <!-- ── 中栏：跑团主日志 ── -->
+  <section class="pane pane-main">
+    <div class="log-head">
+      <div id="sceneBar" class="scene-bar">尚未开局</div>
+      <div class="log-tools">
+        <button class="btn tiny" id="btnScrollBottom">↓ 到底部</button>
+        <button class="btn tiny" id="btnClearLog">清屏</button>
+      </div>
+    </div>
+    <div id="log" class="log"></div>
+  </section>
+
+  <!-- ── 右栏：角色卡与记忆 ── -->
+  <aside class="pane pane-right">
+    <div class="tabs" id="rightTabs">
+      <button class="tab active" data-tab="sheet">角色卡</button>
+      <button class="tab" data-tab="memory">记忆</button>
+      <button class="tab" data-tab="player">跨周目</button>
+      <button class="tab" data-tab="dice">骰子</button>
+      <button class="tab" data-tab="cost">成本</button>
+    </div>
+    <div class="tab-body" id="rightBody">
+      <div class="empty">选择左侧一个席位查看详情</div>
+    </div>
+  </aside>
+</main>
+
+<!-- ══════════════════════════ 底栏：导演指令 ══════════════════════════ -->
+<footer class="bottombar">
+  <span class="director-label">导演指令</span>
+  <input id="directorInput" type="text"
+         placeholder="以场外身份给守秘人一句提示，例如：让雨停下来，然后有东西开始敲门">
+  <button class="btn accent" id="btnDirector">发送</button>
+</footer>
+
+<!-- ══════════════════════════ 弹窗：设置 ══════════════════════════ -->
+<div class="modal" id="modalSettings">
+  <div class="modal-box wide">
+    <header class="modal-head">
+      <h3>设置</h3>
+      <button class="btn tiny ghost" data-close>✕</button>
+    </header>
+    <div class="modal-body">
+      <div class="notice">
+        <b>两套接口都在这儿：</b>
+        选「DeepSeek 官方」只要粘一个 Key 就能用；选「自定义」可以填任意
+        OpenAI 兼容端点的 URL / Key / 模型名。<b>每个席位各自独立配置</b>，
+        也就是说每个 AI 可以走不同的服务商、不同的 Key。
+        想先零成本试跑，选「离线模拟」。
+      </div>
+
+      <div class="row-actions">
+        <label class="inline-field">
+          <span>玩家人数（PL）</span>
+          <input type="number" id="plCount" min="0" max="8" value="3">
+        </label>
+        <button class="btn" id="btnApplyPlCount">应用人数</button>
+        <button class="btn" id="btnFillDeepseek">一键填入 DeepSeek 官方地址</button>
+        <button class="btn" id="btnProbeAll">测试全部连接</button>
+      </div>
+
+      <div id="seatEditors"></div>
+
+      <h4 class="section-h">全局选项</h4>
+      <div id="optionEditors" class="option-grid"></div>
+      <p class="hint" id="costHint"></p>
+    </div>
+    <footer class="modal-foot">
+      <button class="btn ghost" id="btnResetConfig">恢复默认</button>
+      <span class="spacer"></span>
+      <button class="btn" data-close>取消</button>
+      <button class="btn primary" id="btnSaveConfig">保存设置</button>
+    </footer>
+  </div>
+</div>
+
+<!-- ══════════════════════════ 弹窗：名册与站位 ══════════════════════════ -->
+<div class="modal" id="modalRoster">
+  <div class="modal-box">
+    <header class="modal-head">
+      <h3>名册与站位</h3>
+      <button class="btn tiny ghost" data-close>✕</button>
+    </header>
+    <div class="modal-body">
+      <div class="notice">
+        这桌上是<b>固定的一群人</b>，但<b>位置是可以换的</b>——今天你当守秘人，明天他当。
+        <b>记忆跟着人走，不跟着位置走</b>：半糖这次当 KP，下次当调查员，
+        她的梗、口头禅和旧账都还在。换位置也不会丢 API Key，因为 Key 是<b>人</b>的。
+      </div>
+      <div class="notice" style="border-left-color:#7fd39a;background:#14231a;border-color:#2c5c3f;color:#a9dcb9">
+        <b>名册里的名字都是占位的示例</b>——建议你直接改成你和朋友的名字。
+        改完之后 AI 会真的用这些名字互相喊，桌边感会强很多。
+      </div>
+
+      <h4 class="section-h">今天谁坐哪儿</h4>
+      <div class="row-actions">
+        <label class="inline-field">
+          <span>守秘人</span>
+          <select id="kpSelect"></select>
+        </label>
+        <label class="inline-field">
+          <span>玩家人数</span>
+          <input type="number" id="plCount2" min="0" max="6" value="3">
+        </label>
+        <button class="btn" id="btnApplyCount2">按人数补齐</button>
+        <button class="btn accent" id="btnRotateKeeper">🔄 换庄（轮到下一位当 KP）</button>
+      </div>
+      <div id="plPicker" class="player-list"></div>
+      <div class="row-actions">
+        <button class="btn primary" id="btnApplyRoles">应用站位</button>
+        <span class="hint" id="rosterHint"></span>
+      </div>
+
+      <h4 class="section-h">名册（网名、性格、说话风格都可以直接改）</h4>
+      <div id="rosterEditors"></div>
+      <div class="row-actions">
+        <button class="btn" id="btnSaveRoster">保存名册</button>
+        <span class="hint">改完名册要点「保存名册」，再点「应用站位」才会生效到座位上。</span>
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <span class="spacer"></span>
+      <button class="btn" data-close>关闭</button>
+    </footer>
+  </div>
+</div>
+
+<!-- ══════════════════════════ 弹窗：开新团 ══════════════════════════ -->
+<div class="modal" id="modalNewGame">
+  <div class="modal-box">
+    <header class="modal-head">
+      <h3>开新团</h3>
+      <button class="btn tiny ghost" data-close>✕</button>
+    </header>
+    <div class="modal-body">
+      <div class="notice">
+        <b>开新团 = 起一局全新的。</b>上一局会自动存档，随时能在「💾 存档」里接回来。
+        三步：<b>跑什么 → 谁坐哪儿 → 开始</b>。
+      </div>
+
+      <h4 class="section-h">① 这一局跑什么</h4>
+      <div class="row-actions">
+        <button class="btn" id="btnOpenRepo">📂 打开模组仓库</button>
+        <button class="btn" id="btnRefreshModules2">↻ 刷新</button>
+        <span class="hint" id="repoPath"></span>
+      </div>
+      <div id="newGameModules" class="module-list"></div>
+      <div class="field" style="margin-top:10px">
+        <span>自由跑团的设定（不选模组时用）</span>
+        <textarea id="premiseInput2" rows="3"
+          placeholder="例：1925 年冬，你们是阿卡姆的一家私人侦探社成员，接到一封匿名委托……"></textarea>
+      </div>
+
+      <h4 class="section-h">② 谁坐哪儿</h4>
+      <div class="row-actions">
+        <label class="inline-field"><span>守秘人</span>
+          <select id="kpSelect2"></select></label>
+        <label class="inline-field"><span>玩家人数</span>
+          <input type="number" id="plCount3" min="0" max="6" value="3"></label>
+        <button class="btn" id="btnApplyCount3">按人数补齐</button>
+        <button class="btn accent" id="btnRotateKeeper2">🔄 换庄（轮到下一位当 KP）</button>
+      </div>
+      <div id="plPicker2" class="player-list"></div>
+
+      <h4 class="section-h">③ 确认</h4>
+      <div id="newGameSummary" class="current-game">—</div>
+    </div>
+    <footer class="modal-foot">
+      <span class="spacer"></span>
+      <button class="btn" data-close>取消</button>
+      <button class="btn primary" id="btnStartNewGame">🎬 开始新团</button>
+    </footer>
+  </div>
+</div>
+
+<!-- ══════════════════════════ 弹窗：模组 ══════════════════════════ -->
+<div class="modal" id="modalModule">
+  <div class="modal-box">
+    <header class="modal-head">
+      <h3>模组</h3>
+      <button class="btn tiny ghost" data-close>✕</button>
+    </header>
+    <div class="modal-body">
+      <div class="notice">
+        把下载来的剧本文件夹整个丢进 <code id="modulesPath">data/modules/</code>，
+        点刷新就能识别。文件夹里放 <code>module_info.yaml</code>、
+        <code>secret_truth.md</code>（幕后真相，只有 KP 看得到）、
+        <code>scenes/*.md</code>、<code>handouts/*</code>。
+        只有一个 <code>.md</code> 也能用，会按标题自动切场景。
+      </div>
+      <div class="row-actions">
+        <button class="btn" id="btnOpenRepo2">📂 打开模组仓库</button>
+        <button class="btn" id="btnRefreshModules">↻ 刷新</button>
+        <button class="btn" id="btnFreePlay">不选模组（自由跑团）</button>
+      </div>
+      <div id="moduleList" class="module-list"></div>
+      <h4 class="section-h">自由跑团设定（不选模组时使用）</h4>
+      <textarea id="premiseInput" rows="4"
+        placeholder="例：1925 年冬，你们是阿卡姆的一家私人侦探社成员，接到一封匿名委托……"></textarea>
+
+      <h4 class="section-h">扫描版 PDF → 文本（OCR）</h4>
+      <div class="notice">
+        网上找来的模组常常是**扫描件**——那上面的字是画，程序抽不出文字。
+        这时需要一个**看得懂图的模型**把每一页抄下来。
+        <br>· DeepSeek 官方目前没有视觉模型，所以这一步通常要另配一家
+        （Qwen-VL、GLM-4V、GPT-4o 之类的 OpenAI 兼容接口都行）。
+        <br>· 识别一页一个文件缓存在 PDF 旁边，**断了能接着跑**，不用从头再来。
+        <br>· 不想在界面里弄，也可以用命令行：<code>tools\ocr_module.py</code>
+      </div>
+      <div class="field">
+        <span>PDF 路径（把文件拖进来或粘路径）</span>
+        <input type="text" id="ocrPath" placeholder="D:\模组\疯狂山脉.pdf">
+      </div>
+      <div class="row-actions">
+        <button class="btn" id="btnProbePdf">先看看要不要 OCR</button>
+        <span class="hint" id="probeResult"></span>
+      </div>
+      <div class="grid-2">
+        <div class="field"><span>视觉模型 Base URL</span>
+          <input type="text" id="visBase" placeholder="https://.../v1"></div>
+        <div class="field"><span>模型名</span>
+          <input type="text" id="visModel" placeholder="qwen-vl-max"></div>
+        <div class="field span-2"><span>API Key</span>
+          <input type="password" id="visKey" placeholder="sk-..."></div>
+        <div class="field"><span>渲染 DPI</span>
+          <input type="number" id="visDpi" min="72" max="400" value="150"></div>
+        <div class="field"><span>只识别这些页（留空=全部）</span>
+          <input type="text" id="ocrPages" placeholder="1-20 或 3,7,9"></div>
+      </div>
+      <div class="row-actions">
+        <button class="btn" id="btnSaveVision">保存视觉模型配置</button>
+        <button class="btn primary" id="btnRunOcr">开始识别并生成模组</button>
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <span class="spacer"></span>
+      <button class="btn" data-close>关闭</button>
+      <button class="btn primary" id="btnNewSession">用这个开新局</button>
+    </footer>
+  </div>
+</div>
+
+<!-- ══════════════════════════ 弹窗：玩家档案 ══════════════════════════ -->
+<div class="modal" id="modalPlayers">
+  <div class="modal-box">
+    <header class="modal-head">
+      <h3>跨周目玩家档案</h3>
+      <button class="btn tiny ghost" data-close>✕</button>
+    </header>
+    <div class="modal-body">
+      <div class="notice">
+        这里存的<b>不是角色</b>，是<b>玩家本人</b>。角色随模组结束就没了，
+        但玩家会带着上一局的梗、习惯和对同桌人的看法，走进下一局。
+        每局散场后 AI 会自己复盘并写进这里。
+      </div>
+      <div id="playerList" class="player-list"></div>
+      <div id="playerDetail" class="player-detail"></div>
+    </div>
+    <footer class="modal-foot">
+      <span class="spacer"></span>
+      <button class="btn" data-close>关闭</button>
+    </footer>
+  </div>
+</div>
+
+<!-- ══════════════════════════ 弹窗：规则 ══════════════════════════ -->
+<div class="modal" id="modalRules">
+  <div class="modal-box">
+    <header class="modal-head">
+      <h3>规则与术语</h3>
+      <button class="btn tiny ghost" data-close>✕</button>
+    </header>
+    <div class="modal-body">
+      <div class="notice">
+        规则是<b>分层按需注入</b>的，不是每轮全量重发——那太烧钱。
+        常驻的只有判定要点；其余术语在叙述里真的出现时，才补一句话定义，
+        而且同一个词整局只解释一次。下面这张表就是会被注入的内容。
+      </div>
+      <div class="notice" id="rulesState"></div>
+      <div class="row-actions">
+        <input id="ruleQuery" type="text" placeholder="在规则书全文里查一条规则，例如：孤注一掷">
+        <button class="btn" id="btnSearchRules">检索</button>
+      </div>
+      <div id="ruleHits" class="rule-hits"></div>
+      <h4 class="section-h">术语表（会自动注入给 AI）</h4>
+      <div id="glossaryList" class="glossary-list"></div>
+    </div>
+    <footer class="modal-foot">
+      <span class="spacer"></span>
+      <button class="btn" data-close>关闭</button>
+    </footer>
+  </div>
+</div>
+
+<!-- ══════════════════════════ 弹窗：存档 ══════════════════════════ -->
+<div class="modal" id="modalSessions">
+  <div class="modal-box">
+    <header class="modal-head">
+      <h3>存档</h3>
+      <button class="btn tiny ghost" data-close>✕</button>
+    </header>
+    <div class="modal-body">
+      <div class="row-actions">
+        <button class="btn" id="btnSaveNow">立即存档</button>
+        <button class="btn" id="btnExport">导出跑团记录（Markdown）</button>
+        <button class="btn" id="btnRefreshSessions">↻ 刷新列表</button>
+      </div>
+      <div id="sessionList" class="session-list"></div>
+    </div>
+    <footer class="modal-foot">
+      <span class="spacer"></span>
+      <button class="btn" data-close>关闭</button>
+    </footer>
+  </div>
+</div>
+
+<div id="toasts" class="toasts"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

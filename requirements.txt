@@ -1,0 +1,23 @@
+# AI 跑团引擎 · 运行依赖
+#
+# 一键打包脚本会自动装这些（见 build.ps1）。
+# 手动装： .venv\Scripts\python.exe -m pip install -r requirements.txt
+
+# ── 界面：原生窗口里跑 HTML ──
+pywebview>=6.0
+pythonnet>=3.0
+
+# ── 引擎本身 ──
+pyyaml>=6.0
+requests>=2.31
+
+# ── 模组读取 ──
+pypdf>=5.0          # 文本型 PDF 抽文本
+PyMuPDF>=1.24       # 扫描型 PDF 渲染成图（交给视觉模型 OCR）
+
+# ── 角色卡 ──
+openpyxl>=3.1       # 填 COC7 的 Excel 空白卡
+pillow>=10.0        # 页图缩放 + 图标生成
+
+# ── 打包 ──
+pyinstaller>=6.0

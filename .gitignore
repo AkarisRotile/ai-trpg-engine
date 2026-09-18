@@ -1,0 +1,51 @@
+# ── 运行期数据（每个人跑出来的东西，绝不进仓库）──
+data/players/
+data/memory/
+data/runtime/
+data/exports/
+data/config.json
+data/config.json.*
+data/roster.yaml
+data/rules/glossary_extra.yaml
+data/rules/full/
+data/.webview/
+data/sheet_map.txt
+data/sheet_person.txt
+data/defined_names.txt
+
+# ── 用户自己放的模组（可能有版权，也可能是私活）──
+# 仓库里只保留内置的演示模组
+data/modules/*
+!data/modules/demo_洋馆之夜/
+
+# ── 打包产物 ──
+build/
+dist/
+*.spec
+assets/_exe_icon_check.png
+
+# ── 自检临时目录 ──
+.selftest/
+.cache/
+tmp/
+
+# ── 虚拟环境 ──
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ── 版权材料：规则书是正式出版物的中文译本，不进仓库 ──
+克苏鲁的呼唤第七版*.pdf
+*.pdf
+!data/modules/**/*.pdf
+# 根目录那张空白卡是本地原件，仓库里只保留 data/templates/ 下的那份
+COC7空白卡CY22.4 Plus.xlsx
+
+# ── 编辑器 ──
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
