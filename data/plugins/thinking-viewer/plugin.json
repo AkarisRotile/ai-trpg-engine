@@ -4,6 +4,7 @@
   "author": "内置",
   "description": "实时看每个座位正在写什么，以及引擎把他写成的东西改成了什么样。用来查是哪一步把话写坏了。",
   "surface": "window",
+  "capability": "thinking",
   "entry": { "page": "page.html", "script": "ui.js" },
   "engine_options": { "debug_stream": true }
 }

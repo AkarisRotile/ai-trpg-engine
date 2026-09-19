@@ -1,0 +1,9 @@
+{
+  "enabled": {
+    "thinking-viewer": true,
+    "battle-grid": true
+  },
+  "active": {
+    "thinking": "thinking-viewer"
+  }
+}

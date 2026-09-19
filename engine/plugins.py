@@ -30,7 +30,14 @@ from . import config as cfgmod
 # 合法的"面"。插件自己挑一个，界面按这个决定怎么摆放它。
 SURFACES = ("modal", "window", "panel")
 
+# 认得的坑位。同一件事可以有好几个插件做，谁当值由用户挑。
+CAPABILITIES: dict[str, str] = {
+    "thinking": "看模型的思维链和引擎改了什么",
+    "battle": "画战斗格子和先攻顺序",
+}
+
 _ID_RE = re.compile(r"^[A-Za-z0-9_\-\u4e00-\u9fff]{1,48}$")
+_CAP_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 # 插件能读的文件类型。挡住 .py / .exe 这类不该由界面直接取的东西。
 _ASSET_SUFFIXES = {".html", ".js", ".css", ".json", ".txt", ".svg", ".png",
                    ".jpg", ".jpeg", ".webp", ".gif"}
@@ -52,6 +59,16 @@ def _safe_id(pid: str) -> str:
 # ---------------------------------------------------------------- 启停状态
 
 def load_state() -> dict[str, bool]:
+    return {str(k): bool(v) for k, v in (load_raw().get("enabled") or {}).items()}
+
+
+def load_active() -> dict[str, str]:
+    """每个坑位现在是谁当值。键是坑位名，值是插件 id。"""
+    raw = load_raw().get("active") or {}
+    return {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+
+
+def load_raw() -> dict[str, Any]:
     p = state_path()
     if not p.exists():
         return {}
@@ -59,16 +76,21 @@ def load_state() -> dict[str, bool]:
         d = json.loads(p.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return {}
-    if not isinstance(d, dict):
-        return {}
-    return {str(k): bool(v) for k, v in (d.get("enabled") or {}).items()}
+    return d if isinstance(d, dict) else {}
 
 
 def save_state(state: dict[str, bool]) -> None:
+    _write_raw({**load_raw(), "enabled": state})
+
+
+def save_active(active: dict[str, str]) -> None:
+    _write_raw({**load_raw(), "active": active})
+
+
+def _write_raw(d: dict[str, Any]) -> None:
     p = state_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"enabled": state}, ensure_ascii=False, indent=2),
-                 encoding="utf-8")
+    p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # ---------------------------------------------------------------- 读清单
@@ -81,11 +103,14 @@ class Plugin:
     author: str = ""
     description: str = ""
     surface: str = "modal"
+    # 坑位。同一件事可以有好几个插件做，谁当值由用户挑。
+    capability: str = ""
     entry_page: str = ""
     entry_script: str = ""
     # 插件可以要求引擎打开某个选项。启停时跟着开关走。
     engine_options: dict[str, Any] = field(default_factory=dict)
     enabled: bool = False
+    is_active: bool = False
     error: str = ""
     dir: str = ""
 
@@ -94,6 +119,7 @@ class Plugin:
             "id": self.id, "name": self.name or self.id, "version": self.version,
             "author": self.author, "description": self.description,
             "surface": self.surface, "enabled": self.enabled,
+            "capability": self.capability, "is_active": self.is_active,
             "page": self.entry_page, "script": self.entry_script,
             "has_page": bool(self.entry_page), "has_script": bool(self.entry_script),
             "engine_options": dict(self.engine_options),
@@ -126,6 +152,9 @@ def _read_manifest(d: Path) -> Plugin:
     if surface and surface not in SURFACES:
         p.error = f"不认识的 surface「{surface}」，只能是 {'/'.join(SURFACES)}"
 
+    cap = str(raw.get("capability") or "").strip()
+    p.capability = cap if _CAP_RE.match(cap) else ""
+
     entry = raw.get("entry") or {}
     if isinstance(entry, dict):
         page = str(entry.get("page") or "").strip()
@@ -147,9 +176,10 @@ def _read_manifest(d: Path) -> Plugin:
 
 
 def list_plugins() -> list[Plugin]:
-    """扫一遍插件目录，带上启停状态。永远不抛异常。"""
+    """扫一遍插件目录，带上启停状态和谁当值。永远不抛异常。"""
     root = plugins_root()
     state = load_state()
+    active = load_active()
     out: list[Plugin] = []
     if not root.is_dir():
         return out
@@ -167,7 +197,21 @@ def list_plugins() -> list[Plugin]:
             p = Plugin(id=d.name, dir=str(d), error=f"读清单时出错：{e}")
         p.enabled = bool(state.get(p.id))
         out.append(p)
+
+    # 谁当值：用户挑过就用挑的，没挑过就是第一个开着的。
+    # 挑过的那个被停用或者删了，会自动落到下一个，不会留个空坑。
+    for cap in CAPABILITIES:
+        members = [p for p in out if p.capability == cap and p.enabled and not p.error]
+        if not members:
+            continue
+        pick = next((p for p in members if p.id == active.get(cap)), members[0])
+        pick.is_active = True
     return out
+
+
+def active_for(cap: str) -> str:
+    """这个坑位现在是谁当值。没插件占坑就返回空串。"""
+    return next((p.id for p in list_plugins() if p.capability == cap and p.is_active), "")
 
 
 def set_enabled(pid: str, enabled: bool) -> dict[str, Any]:
@@ -188,19 +232,96 @@ def set_enabled(pid: str, enabled: bool) -> dict[str, Any]:
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"启停状态没存下去：{e}"}
 
-    notes = []
-    if hit.engine_options:
-        cfg = cfgmod.load_config()
-        opts = cfg.setdefault("options", {})
-        for k, v in hit.engine_options.items():
-            opts[k] = v if enabled else False
+    # 关掉的正好是当值的那个，就让位给同坑位的下一个
+    if not enabled and hit.capability and load_active().get(hit.capability) == pid:
+        act = load_active()
+        act.pop(hit.capability, None)
         try:
-            cfgmod.save_config(cfg)
-            notes.append("插件要求的引擎选项已" + ("打开" if enabled else "关掉"))
-        except Exception as e:  # noqa: BLE001
-            notes.append(f"引擎选项没设上：{e}")
-    return {"ok": True, "message": "，".join(notes) or "已保存",
+            save_active(act)
+        except Exception:  # noqa: BLE001
+            pass
+
+    notes = apply_engine_options()
+    return {"ok": True,
+            "message": "，".join(notes) or ("已启用" if enabled else "已停用"),
             "plugin": {**hit.to_dict(), "enabled": bool(enabled)}}
+
+
+def set_active(cap: str, pid: str) -> dict[str, Any]:
+    """指定某个坑位由谁当值。传空串就是让它自己落到第一个开着的。"""
+    cap = (cap or "").strip()
+    pid = (pid or "").strip()
+    if cap not in CAPABILITIES:
+        return {"ok": False, "message": f"没有这个坑位：{cap}"}
+    members = [p for p in list_plugins() if p.capability == cap]
+    if not members:
+        return {"ok": False, "message": f"还没有插件占「{cap}」这个坑"}
+
+    act = load_active()
+    if pid:
+        hit = next((p for p in members if p.id == pid), None)
+        if hit is None:
+            return {"ok": False, "message": f"{pid} 没有占「{cap}」这个坑"}
+        if hit.error:
+            return {"ok": False, "message": f"这个插件有问题，先修好：{hit.error}"}
+        if not hit.enabled:
+            # 挑一个没开的当值那就顺手开上，不然用户会以为没生效
+            r = set_enabled(pid, True)
+            if not r.get("ok"):
+                return r
+        act[cap] = pid
+    else:
+        act.pop(cap, None)
+    try:
+        save_active(act)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"没存下去：{e}"}
+
+    notes = apply_engine_options()
+    winner = active_for(cap)
+    return {"ok": True,
+            "message": f"「{CAPABILITIES[cap]}」现在由 {winner or '无'} 当值"
+                       + ("，" + "，".join(notes) if notes else ""),
+            "active": winner}
+
+
+def apply_engine_options() -> list[str]:
+    """把所有插件要求的引擎选项重算一遍写进配置。
+
+    规则：没占坑的插件，开着就生效；占了坑的，只有当值那个生效。
+    关掉占坑的插件时，坑位要求的选项要跟着回落，不能留在那儿不生效还以为开着。
+    """
+    items = list_plugins()
+    active = load_active()
+
+    # 插件碰过的键先全清成 False，再把该开的打开。
+    # 这样插件被删掉之后，它留下的选项不会永远卡在 True。
+    touched: set[str] = set()
+    for p in items:
+        touched.update(p.engine_options.keys())
+    want: dict[str, Any] = {}
+    for p in items:
+        if p.error or not p.enabled or not p.engine_options:
+            continue
+        if p.capability and not p.is_active:
+            continue
+        want.update(p.engine_options)
+
+    cfg = cfgmod.load_config()
+    opts = cfg.setdefault("options", {})
+    changed = False
+    for k in touched:
+        v = want.get(k, False)
+        if opts.get(k) != v:
+            opts[k] = v
+            changed = True
+    if not changed:
+        return []
+    try:
+        cfgmod.save_config(cfg)
+        return ["引擎选项已跟着插件调整"]
+    except Exception as e:  # noqa: BLE001
+        return [f"引擎选项没设上：{e}"]
 
 
 def read_asset(pid: str, rel: str) -> dict[str, Any]:

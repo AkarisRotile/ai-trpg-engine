@@ -21,7 +21,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import chargen, config as cfgmod, glossary, module_lib, player_memory
+from . import battle as battle_mod
 from . import plugins as plugins_mod
+from . import portraits as portraits_mod
 from . import rules as rules_mod
 from . import errlog
 from .llm import LLMError, probe_seat
@@ -345,11 +347,17 @@ class App:
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "message": f"扫插件目录出错：{e}", "plugins": []}
         return {"ok": True, "plugins": items,
+                "capabilities": dict(plugins_mod.CAPABILITIES),
+                "active": plugins_mod.load_active(),
                 "root": str(plugins_mod.plugins_root())}
 
     def set_plugin_enabled(self, plugin_id: str, enabled: bool) -> dict[str, Any]:
         """开关插件。开的时候顺带把它要求的引擎选项设上。"""
         return plugins_mod.set_enabled(plugin_id, bool(enabled))
+
+    def set_active_plugin(self, capability: str, plugin_id: str) -> dict[str, Any]:
+        """指定某个坑位由谁当值。传空串就让它自己落到第一个开着的。"""
+        return plugins_mod.set_active(capability, plugin_id)
 
     def plugin_asset(self, plugin_id: str, path: str) -> dict[str, Any]:
         """读插件自己的一个文件（page.html / ui.js / 图片）。"""
@@ -358,6 +366,41 @@ class App:
     def open_plugins_folder(self) -> dict[str, Any]:
         plugins_mod.plugins_root().mkdir(parents=True, exist_ok=True)
         return self._open_folder(plugins_mod.plugins_root())
+
+    def battle_state(self) -> dict[str, Any]:
+        """战斗与追逐的格子状态。
+
+        给界面画，也给插件画。位置由守秘人用 <state> 摆，
+        引擎只管谁在哪，不管规则。
+        """
+        if not self.session:
+            return battle_mod.blank()
+        return battle_mod.snapshot(self.session)
+
+    # ══════════════════════════════════════════════ 立绘与头像
+
+    def portrait_get(self, key: str) -> dict[str, Any]:
+        """取一张立绘/头像，返回 data URL。没有就说没有，不算错。"""
+        return portraits_mod.get(key)
+
+    def portrait_set(self, key: str, data: str = "") -> dict[str, Any]:
+        """存一张。data 是 data URL，界面那边直接读文件转过来的。"""
+        return portraits_mod.put(key, data)
+
+    def portrait_remove(self, key: str) -> dict[str, Any]:
+        return portraits_mod.remove(key)
+
+    def portraits(self) -> dict[str, Any]:
+        """目录里现在有哪些图（只给文件名和大小，不塞图片内容）。"""
+        try:
+            items = portraits_mod.listing()
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "message": f"扫立绘目录出错：{e}", "items": {}}
+        return {"ok": True, "items": items, "root": str(portraits_mod.portraits_root())}
+
+    def open_portraits_folder(self) -> dict[str, Any]:
+        portraits_mod.portraits_root().mkdir(parents=True, exist_ok=True)
+        return self._open_folder(portraits_mod.portraits_root())
 
     def open_player_folder(self, player_id: str) -> dict[str, Any]:
         """打开某个玩家的专属文件夹（记忆 + 角色卡都在里面）。"""

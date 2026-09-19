@@ -423,11 +423,78 @@ async function renderRight() {
   const seat = ((S.state && S.state.seats) || []).find((s) => s.seat_id === S.activeSeat);
   if (!seat) { body.appendChild(el('div', 'empty', '找不到该席位')); return; }
 
+  body.appendChild(avatarBlock(seat));
+
   if (S.rightTab === 'sheet') return renderSheet(body, seat);
   if (S.rightTab === 'memory') return renderMemory(body, seat);
   if (S.rightTab === 'player') return renderPlayerTab(body, seat);
   if (S.rightTab === 'dice') return renderDice(body, seat);
   if (S.rightTab === 'cost') return renderCost(body, seat);
+}
+
+/** 立绘/头像那一小块。
+ *
+ * 引擎只管存和取，图从哪来是你自己的事。有图就显示，没有就给个加号。
+ * 命名约定：有角色就用 pc_<角色名>，还没车卡就用 player_<玩家id>。
+ * 插件也能用同一套 key 去调 portrait_get。
+ */
+function seatPortraitKey(seat) {
+  const char = seat.display_name || '';
+  const prof = seat.player_id || '';
+  if (seat.has_character && char) return 'pc_' + char;
+  if (prof) return 'player_' + prof;
+  return 'pc_' + (seat.label || seat.seat_id || '');
+}
+
+function avatarBlock(seat) {
+  const key = seatPortraitKey(seat);
+  const box = el('div', 'avatar-box');
+  const img = el('img', 'avatar-img');
+  img.alt = '';
+  box.appendChild(img);
+
+  const side = el('div', 'avatar-side');
+  side.appendChild(el('div', 'avatar-key', key));
+  const hint = el('div', 'avatar-hint', '引擎只管存和取，图你自己放。');
+  side.appendChild(hint);
+
+  const file = el('input');
+  file.type = 'file';
+  file.accept = 'image/*';
+  file.style.display = 'none';
+  file.onchange = () => {
+    const f = file.files && file.files[0];
+    if (!f) return;
+    if (f.size > 4 * 1024 * 1024) { toast('图太大了，上限 4 MB', 'err'); return; }
+    const fr = new FileReader();
+    fr.onload = async () => {
+      const r = await call('portrait_set', key, String(fr.result));
+      toast(r.message || '存好了', r.ok ? 'ok' : 'err');
+      if (r.ok) { img.src = String(fr.result); img.classList.remove('none'); }
+    };
+    fr.readAsDataURL(f);
+    file.value = '';
+  };
+  box.appendChild(file);
+
+  const add = el('button', 'btn tiny', '选一张');
+  add.onclick = () => file.click();
+  side.appendChild(add);
+
+  const del = el('button', 'btn tiny ghost', '去掉');
+  del.onclick = async () => {
+    const r = await call('portrait_remove', key);
+    toast(r.message || '去掉了', r.ok ? 'ok' : 'err');
+    if (r.ok) { img.removeAttribute('src'); img.classList.add('none'); }
+  };
+  side.appendChild(del);
+  box.appendChild(side);
+
+  call('portrait_get', key).then((r) => {
+    if (r && r.ok) { img.src = r.data; img.classList.remove('none'); }
+    else img.classList.add('none');
+  }).catch(() => img.classList.add('none'));
+  return box;
 }
 
 /** 右栏标签栏：内置那五个 + 每个开着的 panel 插件一个。 */
@@ -1762,6 +1829,8 @@ async function refreshSessions() {
 
 let PLUGINS = [];
 let PLUGIN_ROOT = '';
+let PLUGIN_CAPS = {};      // 坑位名 -> 说明
+let PLUGIN_ACTIVE = {};    // 坑位名 -> 当值的插件 id
 // 打开着的插件：id -> {surface, node, api}
 const PLUGIN_OPEN = new Map();
 // 插件订阅的事件回调：id -> [fn]
@@ -1774,6 +1843,8 @@ async function refreshPlugins() {
     const r = await call('list_plugins');
     PLUGINS = (r && r.plugins) || [];
     PLUGIN_ROOT = (r && r.root) || '';
+    PLUGIN_CAPS = (r && r.capabilities) || {};
+    PLUGIN_ACTIVE = (r && r.active) || {};
   } catch (e) {
     PLUGINS = [];
     reportClientError('读插件清单失败', e && e.stack);
@@ -1786,6 +1857,35 @@ async function refreshPlugins() {
 function renderPlugins() {
   const box = $('pluginList');
   box.innerHTML = '';
+
+  // 坑位：同一件事有好几个插件做的时候，在这儿挑谁当值
+  Object.keys(PLUGIN_CAPS).forEach((cap) => {
+    const members = PLUGINS.filter((p) => p.capability === cap && p.enabled && !p.error);
+    const row = el('div', 'plugin-cap');
+    row.appendChild(el('span', 'k', '坑位·' + PLUGIN_CAPS[cap]));
+    const sel = el('select');
+    if (!members.length) {
+      const o = el('option', null, '（还没有插件占这个坑）');
+      o.value = '';
+      sel.appendChild(o);
+      sel.disabled = true;
+    } else {
+      members.forEach((p) => {
+        const o = el('option', null, (p.name || p.id) + (p.is_active ? '  ← 现在当值' : ''));
+        o.value = p.id;
+        if (p.is_active) o.selected = true;
+        sel.appendChild(o);
+      });
+    }
+    sel.onchange = async () => {
+      const r = await call('set_active_plugin', cap, sel.value);
+      toast(r.message || '已切换', r.ok ? 'ok' : 'err');
+      await refreshPlugins();
+    };
+    row.appendChild(sel);
+    box.appendChild(row);
+  });
+
   if (!PLUGINS.length) {
     box.appendChild(el('div', 'empty',
       '还没有插件。点上面「打开插件目录」，把插件文件夹丢进去，再点「重新扫描」。'));

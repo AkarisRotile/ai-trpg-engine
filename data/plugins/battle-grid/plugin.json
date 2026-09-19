@@ -1,0 +1,9 @@
+{
+  "name": "战斗格子",
+  "version": "0.1",
+  "author": "内置",
+  "description": "把守秘人摆的位置画成格子，右边是 DEX 排出来的先攻顺序，下面一条追逐轨道。只是个基础版，想要好看可以另写一个占同一个坑位的插件。",
+  "surface": "window",
+  "capability": "battle",
+  "entry": { "page": "page.html", "script": "ui.js" }
+}

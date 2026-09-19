@@ -272,6 +272,32 @@ regions:
     affects: [all]
     verification: selftest 的【13】；真窗口 tools/smoke_ui.py
 
+  - id: portraits
+    name: 立绘与头像
+    owns: 图的存放、命名约定、取出来给界面
+    files: [engine/portraits.py]
+    entry: [get(), put(), remove(), listing(), safe_key(), sniff()]
+    notes:
+      - 只管存和取，**不生成图**。谁画、画成什么样是插件的事。
+      - 命名约定：pc_<角色名> / npc_<名字> / player_<玩家id>。
+      - key 会做文件名清洗，越界的路径写不出去。
+      - 认格式看魔数不看后缀，改个名的 exe 进不来。单张上限 4 MB。
+    affects: [app, ui, plugins]
+    verification: selftest 的【23】
+
+  - id: battle
+    name: 战斗格子与追逐
+    owns: 谁在哪一格、先攻顺序、追逐轨道
+    files: [engine/battle.py]
+    entry: [apply(), snapshot(), initiative(), render_for_prompt()]
+    notes:
+      - 只管**谁在哪**，不管规则（该不该打、打不打得中还归守秘人）。
+      - 位置由守秘人用 <state> 摆坐标。叙述里说不清位置，摆坐标才说得清。
+      - 先攻按 DEX 排，引擎自己算，不用守秘人写。
+      - 画格子的是插件（占 battle 坑位），引擎只出数据。
+    affects: [turns, prompts, session, plugins]
+    verification: selftest 的【22】
+
   - id: ui
     name: 界面
     owns: 左栏席位、中间流水、右栏五个标签、七个弹窗、插件管理

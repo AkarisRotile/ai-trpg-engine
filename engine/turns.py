@@ -25,6 +25,7 @@ from typing import Any, Callable
 import yaml
 
 from . import chargen, memory as memory_mod, module_lib, rules as rules_mod
+from . import battle as battle_mod
 from . import clock as clock_mod
 from . import config as cfgmod
 from . import memes as memes_mod
@@ -1466,6 +1467,31 @@ class GameLoop:
 
         if kind == "note":
             self._e("system", f"守秘人备注：{d.arg(1)}")
+            return []
+
+        # ---- 战斗与追逐的格子 ----
+        # 位置这种东西模型描述不清楚，摆坐标才行。引擎只记谁在哪，
+        # 不管规则（该不该打、打不打得中还是守秘人裁定）。
+        if kind in ("battle", "grid", "npc", "place", "move", "drop",
+                    "chase", "战斗", "摆", "撤", "追逐"):
+            pc_dex = {}
+            for pl in self.pls:
+                char = pl.seat.get("character") or {}
+                attrs = char.get("attributes") or {}
+                dex = attrs.get("DEX")
+                if dex is None:
+                    dex = (char.get("attrs") or {}).get("DEX")
+                pc_dex[pl.display_name] = int(dex or 0)
+            err = battle_mod.apply(self.session, kind, target, payload,
+                                   pc_dex=pc_dex)
+            if err:
+                return [err]
+            snap = battle_mod.snapshot(self.session)
+            self._e("battle", "", name="战况",
+                    meta={"battle": snap})
+            if kind in ("battle", "战斗"):
+                self._e("system", "〔战斗格子已打开〕" if snap["active"]
+                        else "〔战斗结束，格子收起来了〕")
             return []
 
         if kind in ("key", "beat", "节点", "keybeat"):

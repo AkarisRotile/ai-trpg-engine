@@ -58,6 +58,11 @@ class Session:
         self.module_study: dict[str, Any] = {}
         # 结局之后才解禁模组原文给 PL 看
         self.module_revealed: bool = False
+        # 战斗与追逐的格子。守秘人用 <state> 放子和移动，引擎存，
+        # 界面（或插件）画。位置这种东西模型描述不清楚，摆坐标才行。
+        #   {active, w, h, tokens: [{id,name,kind,x,y,note}],
+        #    chase: {active, len, positions: {名字: 格数}}}
+        self.battle: dict[str, Any] = {}
 
     # -------------------------------------------------- 路径
 
@@ -114,6 +119,7 @@ class Session:
             "chargen_briefing": self.chargen_briefing,
             "module_study": self.module_study,
             "module_revealed": self.module_revealed,
+            "battle": self.battle,
         }
 
     def save(self) -> Path:
@@ -151,6 +157,7 @@ class Session:
         s.ended_reason = d.get("ended_reason", "")
         s.chargen_briefing = d.get("chargen_briefing", "")
         s.module_study = d.get("module_study") or {}
+        s.battle = d.get("battle") or {}
         s.module_revealed = bool(d.get("module_revealed"))
         s.events = Session._read_transcript(session_id)
         return s

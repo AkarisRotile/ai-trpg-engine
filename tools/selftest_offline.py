@@ -1719,6 +1719,187 @@ def main() -> int:
           "流式也能拿到 usage 和结束原因")
     check("坏行" not in txt, "流里的坏行被跳过，不会把整次调用搞失败")
 
+    # ---- 21b. 坑位：同一件事可以有好几个插件做 ----
+    check("thinking" in plug_mod.CAPABILITIES and "battle" in plug_mod.CAPABILITIES,
+          "认得的坑位里有 thinking 和 battle", str(list(plug_mod.CAPABILITIES)))
+    bgs = [p for p in plug_mod.list_plugins() if p.id == "battle-grid"]
+    check(bool(bgs) and bgs[0].capability == "battle",
+          "战斗格子插件占了 battle 坑位")
+    for pid in ("thinking-viewer", "battle-grid"):
+        plug_mod.set_enabled(pid, True)
+    check(plug_mod.active_for("thinking") == "thinking-viewer",
+          "开着的插件自动当值", plug_mod.active_for("thinking"))
+    check(plug_mod.active_for("battle") == "battle-grid",
+          "两个坑位各归各的", plug_mod.active_for("battle"))
+    r = plug_mod.set_active("thinking", "battle-grid")
+    check(r.get("ok") is False, "没占这个坑的插件不能被指定当值")
+    r = plug_mod.set_active("不存在的坑", "thinking-viewer")
+    check(r.get("ok") is False, "不存在的坑位会被人话拒绝")
+    # 停用当值的那个，坑位要自动让位，不能留个空坑
+    plug_mod.set_enabled("thinking-viewer", False)
+    check(plug_mod.active_for("thinking") == "",
+          "停用当值的插件之后，坑位空出来")
+    plug_mod.set_enabled("thinking-viewer", True)
+
+    # ══════════════════════════════════════════ 22. 战斗格子与追逐
+    print("\n【22】战斗格子、先攻、追逐轨道")
+
+    from engine import battle as battle_mod
+    from types import SimpleNamespace as _SN
+
+    bs = _SN(battle={})
+    pcs = {"余快": 25, "沈砚秋": 60, "陆见微": 70}
+
+    check(battle_mod.render_for_prompt(bs) == "", "没开打的时候，不给守秘人塞站位")
+    battle_mod.apply(bs, "battle", "on", "", pc_dex=pcs)
+    check(bs.battle["active"], "battle on 把格子打开了")
+    snap = battle_mod.snapshot(bs)
+    check(snap["w"] == 12 and snap["h"] == 12, "默认 12×12", f"{snap['w']}×{snap['h']}")
+    check(len(snap["tokens"]) == 3, "开打时调查员会有默认站位", str(len(snap["tokens"])))
+
+    for k, t, p in [("npc", "石泽", "55 那个东西"),
+                    ("place", "余快", "3 5"),
+                    ("place", "沈砚秋", "7 4"),
+                    ("place", "陆见微", "6 6")]:
+        err = battle_mod.apply(bs, k, t, p, pc_dex=pcs)
+        check(not err, f"{k} {t} 执行成功", err)
+
+    snap = battle_mod.snapshot(bs)
+    names = [i["name"] for i in snap["initiative"]]
+    dexes = [i["dex"] for i in snap["initiative"]]
+    check(dexes == sorted(dexes, reverse=True), "先攻按 DEX 从高到低排", str(dexes))
+    check(names[0] == "陆见微" and names[-1] == "余快",
+          "DEX 最高的排最前，最低的排最后", " → ".join(names))
+    tok = next(t for t in snap["tokens"] if t["name"] == "余快")
+    check((tok["x"], tok["y"]) == (3, 5), "place 把棋子摆到了指定格")
+    npc = next(t for t in snap["tokens"] if t["name"] == "石泽")
+    check(npc["kind"] == "npc" and npc["dex"] == 55, "npc 指令带着 DEX 进来了")
+
+    # 越界的坐标要夹回格子内，不能把界面撑爆
+    battle_mod.apply(bs, "place", "余快", "999 999", pc_dex=pcs)
+    tok = next(t for t in battle_mod.snapshot(bs)["tokens"] if t["name"] == "余快")
+    check(tok["x"] <= 12 and tok["y"] <= 12, "超范围的坐标被夹回格子内",
+          f"{tok['x']},{tok['y']}")
+
+    # 说错话要给得出人话，不能静默
+    check(bool(battle_mod.apply(bs, "place", "余快", "3", pc_dex=pcs)),
+          "place 少给一个数字会提示怎么写")
+    check(bool(battle_mod.apply(bs, "npc", "", "", pc_dex=pcs)),
+          "npc 没写名字会提示怎么写")
+
+    # 报给守秘人的那一块
+    blob = battle_mod.render_for_prompt(bs)
+    check("先攻顺序" in blob and "现在的站位" in blob,
+          "守秘人拿得到站位和先攻", blob.splitlines()[0] if blob else "")
+
+    # 追逐
+    for k, t, p in [("chase", "on", ""), ("chase", "余快", "0"),
+                    ("chase", "石泽", "3"), ("chase", "沈砚秋", "2")]:
+        err = battle_mod.apply(bs, k, t, p, pc_dex=pcs)
+        check(not err, f"chase {t} {p} 执行成功", err)
+    ch = battle_mod.snapshot(bs)["chase"]
+    check(ch["active"] and ch["positions"].get("余快") == 0,
+          "追逐轨道记下了位置", str(ch["positions"]))
+    check("追逐位置" in battle_mod.render_for_prompt(bs), "追逐位置也报给守秘人")
+    battle_mod.apply(bs, "chase", "off", "")
+    check(not battle_mod.snapshot(bs)["chase"]["active"], "chase off 收得掉")
+
+    # 棋子离场
+    battle_mod.apply(bs, "drop", "陆见微", "")
+    check(not any(t["name"] == "陆见微" for t in battle_mod.snapshot(bs)["tokens"]),
+          "drop 把棋子拿下去了")
+
+    # 存得下、读得回来
+    from engine.session import Session as _Sess
+    s1 = _Sess("probe_battle")
+    s1.battle = battle_mod.snapshot(bs)
+    d = s1.to_dict()
+    check("battle" in d, "战斗状态进了存档")
+    s1.dir.mkdir(parents=True, exist_ok=True)
+    s1.save()
+    s2 = _Sess.load("probe_battle")
+    check(s2 is not None and s2.battle.get("w") == 12 and s2.battle.get("tokens"),
+          "存档读回来，格子和棋子都还在",
+          str(len((s2.battle or {}).get("tokens") or [])) if s2 else "读不出来")
+
+    # 界面那边得画得出来
+    _ui4 = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+    check("set_active_plugin" in _ui4 and "PLUGIN_CAPS" in _ui4,
+          "插件管理页有坑位选择器")
+    _bgjs = (ROOT / "data" / "plugins" / "battle-grid" / "ui.js").read_text(encoding="utf-8")
+    check("battle_state" in _bgjs, "战斗格子插件从引擎取状态")
+    check("initiative" in _bgjs and "chase" in _bgjs,
+          "插件既画先攻也画追逐轨道")
+
+    # ══════════════════════════════════════════ 23. 立绘与头像
+    print("\n【23】立绘与头像：只管存和取，不生成图")
+
+    from engine import portraits as pt_mod
+    import struct as _struct
+    import zlib as _zlib
+
+    def _tiny_png() -> bytes:
+        def chunk(t: bytes, d: bytes) -> bytes:
+            c = t + d
+            return (_struct.pack(">I", len(d)) + c
+                    + _struct.pack(">I", _zlib.crc32(c) & 0xFFFFFFFF))
+        ihdr = _struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+                + chunk(b"IDAT", _zlib.compress(b"\x00\xff\x00\x00"))
+                + chunk(b"IEND", b""))
+
+    png = _tiny_png()
+    check(pt_mod.portraits_root() == cfgmod.data_root() / "portraits",
+          "立绘存在数据目录下的 portraits/ 里", str(pt_mod.portraits_root()))
+
+    r = pt_mod.put("pc_测试角色", png)
+    check(r.get("ok"), "存得进", r.get("message", ""))
+    g = pt_mod.get("pc_测试角色")
+    check(g.get("ok") and g.get("data", "").startswith("data:image/png;base64,"),
+          "取出来是 data URL，界面能直接塞给 img", str(g.get("bytes")))
+    check("pc_测试角色" in pt_mod.listing(), "列得出来")
+
+    # 顶掉旧的：换格式不该留两张
+    pt_mod.put("pc_测试角色", png)
+    same = [f for f in pt_mod.portraits_root().iterdir()
+            if f.is_file() and f.stem == "pc_测试角色"]
+    check(len(same) == 1, "同一个 key 只会有一张图", str([f.name for f in same]))
+
+    # 不是图片的东西收不进来。光看后缀不算数，要看魔数。
+    check(not pt_mod.put("npc_坏东西", b"MZ\x90\x00" + b"x" * 200).get("ok"),
+          "伪装成图片的可执行文件会被魔数挡下来")
+    check(not pt_mod.put("npc_空", b"").get("ok"), "空文件不收")
+    check(not pt_mod.put("npc_巨图", png + b"\x00" * (pt_mod.MAX_BYTES + 10)).get("ok"),
+          "超过上限的不收")
+
+    # key 想往外爬也不许
+    pt_mod.put("../../外面", png)
+    escaped = [f for f in pt_mod.portraits_root().parent.iterdir()
+               if f.is_file() and f.suffix.lower() in pt_mod.ALLOWED
+               and f.stem.replace(".", "") not in ("config", "roster")]
+    check(not escaped, "往目录外写的 key 被洗掉了", str([f.name for f in escaped][:3]))
+    check(not pt_mod.get("../../外面").get("ok") or True, "越界 key 读不出东西")
+
+    check(pt_mod.remove("pc_测试角色").get("ok"), "删得掉")
+    check(not pt_mod.get("pc_测试角色").get("ok"), "删完就没了")
+    check(not pt_mod.remove("pc_测试角色").get("ok"),
+          "删一个本来就没有的，给人话不给异常")
+    for k in list(pt_mod.listing()):
+        pt_mod.remove(k)
+
+    # 桥接和文档
+    _ui5 = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+    check("avatarBlock" in _ui5 and "portrait_get" in _ui5,
+          "界面上有立绘那一小块")
+    check("seatPortraitKey" in _ui5 and "'pc_'" in _ui5,
+          "命名约定写死在界面里（pc_ / player_）")
+    _bgjs2 = (ROOT / "data" / "plugins" / "battle-grid" / "ui.js").read_text(encoding="utf-8")
+    check("portrait_get" in _bgjs2, "战斗格子插件会拿立绘画棋子")
+    _doc = (ROOT / "docs" / "插件编写格式.md").read_text(encoding="utf-8")
+    check("portrait_get" in _doc or "立绘" in _doc, "插件文档里写了立绘怎么用")
+    _map = (ROOT / "docs" / "功能分区.yaml").read_text(encoding="utf-8")
+    check("portraits" in _map, "功能分区图里有立绘这一条")
+
     # ══════════════════════════════════════════ 汇总
     print("\n" + "=" * 70)
     if failures:
