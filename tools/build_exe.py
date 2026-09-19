@@ -202,6 +202,20 @@ def main() -> int:
     elif demo_dst.is_dir():
         print("已附带演示模组：洋馆之夜（本来就在位）")
 
+    # 内置插件跟着走。只带仓库里那两个（.gitignore 里也是只放这两个），
+    # 用户自己装的插件不复制，免得把别人的东西打进去发出去。
+    builtin = ("thinking-viewer", "battle-grid")
+    for pid in builtin:
+        psrc = ROOT / "data" / "plugins" / pid
+        pdst = data / "plugins" / pid
+        if not psrc.is_dir():
+            continue
+        if psrc.resolve() == pdst.resolve():
+            print(f"已附带内置插件：{pid}（本来就在位）")
+            continue
+        shutil.copytree(psrc, pdst, dirs_exist_ok=True)
+        print(f"已附带内置插件：{pid}")
+
     (install_dir / "读我.txt").write_text(
         "AI 跑团引擎 · 克苏鲁的呼唤第七版\n"
         + "=" * 44 + "\n\n"

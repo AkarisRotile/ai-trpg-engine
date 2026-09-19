@@ -14,6 +14,15 @@ import json
 import sys
 from pathlib import Path
 
+# 参考预设的文件名里有 emoji（TGbreak😺V3.1.2.json 这种）。
+# 控制台默认是 GBK，一打印就 UnicodeEncodeError 崩掉，
+# 而这是道闸门，崩了就等于没检查。所以先把自己切成 UTF-8。
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:  # noqa: BLE001
+    pass
+
 ROOT = Path(__file__).resolve().parent.parent
 REF_DIR = ROOT / "参考（严格禁止更新至github）"
 
