@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -401,6 +402,10 @@ class BaseAgent:
         self.session_id = session_id
         # 骰子内核由回合管理器注入；AI 只能通过它申请掷骰，碰不到随机源
         self.kernel: Any = None
+        # 调试旁路。开了之后这次调用会走流式，把模型正在写的东西
+        # 一段段吐给界面，用来查"是哪一步把话写坏了"。
+        # 关着的时候是 None，请求照旧走整包返回。
+        self.debug_emit: Any = None
 
         # ★ 跨周目**玩家层**记忆。
         #   角色记忆（self.memory）每局清零；玩家记忆（self.card）跨模组、跨站位累积。
@@ -423,19 +428,69 @@ class BaseAgent:
     # -------------------------------------------------- 底层调用
 
     def _call(self, messages: list[dict[str, str]], *, phase: str = "play") -> LLMResult:
+        # 开了调试旁路就走流式：模型正在写的东西会一段段吐给界面。
+        # 关着（默认）走整包返回，少一层解析。
+        on_delta = self._delta_sink(phase) if self.debug_emit else None
         res = self.client.chat(
             messages,
             temperature=self.seat.get("temperature", 0.85),
             max_tokens=self.seat.get("max_tokens", 1400),
             mock_phase=phase,
+            on_delta=on_delta,
         )
+        raw_text = res.text
         # 机械清洗。破折号、Markdown 加粗、桌边话的句尾句号，这几条没有歧义，
         # 代码一定修得对，交给模型重写既花钱又不保证。这里是所有模型输出的
         # 唯一收口点，PL、KP、车卡、研读、审卡全都过这一道。
         # 机器通道（state/roll/recall）一个字都不碰，那里面是指令和骰点。
         res.text = clean_output(res.text)
         self.stats.add(res)
+
+        if self.debug_emit:
+            self._debug({
+                "seat": self.display_name,
+                "seat_id": self.seat_id,
+                "kind": self.kind,
+                "phase": phase,
+                "text": raw_text,
+                "cleaned": res.text,
+                "changed": raw_text != res.text,
+                "prompt_tokens": res.prompt_tokens,
+                "completion_tokens": res.completion_tokens,
+                "cached_tokens": res.cached_tokens,
+                "latency_ms": res.latency_ms,
+                "final": True,
+            })
         return res
+
+    def _delta_sink(self, phase: str):
+        """把流式的碎片攒起来，半秒回吐一次。
+
+        不是每来一个字就发一条事件：那样界面会被淹掉，
+        而且事件队列是给轮询取的，攒一下反而更顺。
+        """
+        buf = {"text": "", "last": 0.0}
+
+        def sink(piece: str) -> None:
+            buf["text"] += piece
+            now = time.monotonic()
+            if now - buf["last"] >= 0.5:
+                buf["last"] = now
+                self._debug({
+                    "seat": self.display_name, "seat_id": self.seat_id,
+                    "kind": self.kind, "phase": phase,
+                    "text": buf["text"], "final": False,
+                })
+        return sink
+
+    def _debug(self, payload: dict[str, Any]) -> None:
+        fn = self.debug_emit
+        if not fn:
+            return
+        try:
+            fn(payload)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _trim(self, keep_pairs: int) -> None:
         """只保留最近 N 轮逐字历史。远期事实已由 L2 编年史接管，丢得起。"""

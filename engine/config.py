@@ -270,6 +270,9 @@ def default_config() -> dict[str, Any]:
             "memory_mode": "index",    # index = 只给索引+联想召回；full = 直接摊开整棵树
             "rules_detail": "lean",    # lean | standard | full —— 规则注入详细度
             "linter_retry": 1,         # 元层命中后的静默重写次数
+            # 调试旁路：开了之后模型走流式，每半秒把正在写的东西推给界面。
+            # 「思维链查看器」插件会自己把它打开，平时关着（走整包返回更稳）。
+            "debug_stream": False,
             "parallel_pl": True,       # 多名 PL 并行生成（更快，但瞬时并发高）
             # 每轮谁出场：chance = 按桌边话量抽（默认，像真人桌）；
             # all = 每轮全员都动（调试或就想看满桌的时候用）

@@ -64,7 +64,13 @@ class BaseClient:
 
     def chat(self, messages: list[dict[str, str]], *,
              temperature: float | None = None, max_tokens: int | None = None,
-             **kw: Any) -> LLMResult:
+             on_delta: Any = None, **kw: Any) -> LLMResult:
+        """发一次对话。
+
+        `on_delta` 是可选的：传一个 callable，就会走 SSE 流式，
+        每收到一小段正文就回调一次。这个只给调试页用——
+        正常跑团不需要流式，多一层解析反而更容易出错。
+        """
         raise NotImplementedError
 
     def probe(self) -> tuple[bool, str]:
@@ -136,18 +142,20 @@ class OpenAICompatClient(BaseClient):
 
     def chat(self, messages: list[dict[str, str]], *,
              temperature: float | None = None, max_tokens: int | None = None,
-             **kw: Any) -> LLMResult:
+             on_delta: Any = None, **kw: Any) -> LLMResult:
         payload: dict[str, Any] = {"model": self.model, "messages": messages}
         if max_tokens:
             payload["max_tokens"] = int(max_tokens)
         if self._supports_sampling():
             if temperature is not None:
                 payload["temperature"] = float(temperature)
-        payload["stream"] = False
+        # 只有调试页要看流式。平时走整包返回：少一层解析，也少一处会出错的地方。
+        use_stream = callable(on_delta)
+        payload["stream"] = bool(use_stream)
 
         headers = {
             "Content-Type": "application/json",
-            "Accept": "application/json",
+            "Accept": "text/event-stream" if use_stream else "application/json",
             "Authorization": f"Bearer {self.api_key}",
         }
 
@@ -157,7 +165,7 @@ class OpenAICompatClient(BaseClient):
             try:
                 resp = requests.post(self.url, headers=headers,
                                      data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                                     timeout=self.timeout)
+                                     timeout=self.timeout, stream=use_stream)
             except requests.exceptions.SSLError as e:
                 raise LLMError(f"TLS 握手失败，无法连接 {self.url}。\n{e}") from e
             except requests.exceptions.ConnectTimeout as e:
@@ -188,6 +196,24 @@ class OpenAICompatClient(BaseClient):
                     time.sleep(1.5 * (attempt + 1))
                     continue
                 raise err
+
+            if use_stream:
+                text, reasoning, usage, finish = self._consume_stream(resp, on_delta)
+                if not text.strip() and finish == "length":
+                    raise LLMError("模型还没开始输出就达到了 max_tokens 上限，"
+                                   "请调大该座位的 max_tokens。")
+                details = usage.get("prompt_tokens_details") or {}
+                return LLMResult(
+                    text=text,
+                    reasoning=reasoning,
+                    prompt_tokens=int(usage.get("prompt_tokens") or 0),
+                    completion_tokens=int(usage.get("completion_tokens") or 0),
+                    cached_tokens=int(usage.get("prompt_cache_hit_tokens")
+                                      or details.get("cached_tokens") or 0),
+                    model=self.model,
+                    latency_ms=latency,
+                    raw={"id": "", "finish_reason": finish, "streamed": True},
+                )
 
             try:
                 data = resp.json()
@@ -227,6 +253,52 @@ class OpenAICompatClient(BaseClient):
             )
 
         raise last_err or LLMError("请求失败，且没有可用的错误信息。")
+
+    @staticmethod
+    def _consume_stream(resp: Any, on_delta: Any) -> tuple[str, str, dict, str]:
+        """读 SSE 流，边读边回吐。
+
+        返回 (正文, 思考内容, usage, finish_reason)。
+        解析失败的行直接跳过——流式只是给调试页看的，
+        不能因为它读不懂某一行就把整次调用搞失败。
+        """
+        text_parts: list[str] = []
+        think_parts: list[str] = []
+        usage: dict[str, Any] = {}
+        finish = ""
+        for raw in resp.iter_lines(decode_unicode=False):
+            if not raw:
+                continue
+            try:
+                line = raw.decode("utf-8", "replace").strip()
+            except Exception:  # noqa: BLE001
+                continue
+            if not line.startswith("data:"):
+                continue
+            body = line[5:].strip()
+            if body == "[DONE]":
+                break
+            try:
+                chunk = json.loads(body)
+            except ValueError:
+                continue
+            if isinstance(chunk.get("usage"), dict):
+                usage = chunk["usage"]
+            for ch in chunk.get("choices") or []:
+                if ch.get("finish_reason"):
+                    finish = ch["finish_reason"]
+                delta = ch.get("delta") or {}
+                think = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                if think:
+                    think_parts.append(think)
+                piece = delta.get("content") or ""
+                if piece:
+                    text_parts.append(piece)
+                    try:
+                        on_delta(piece)
+                    except Exception:  # noqa: BLE001
+                        pass
+        return "".join(text_parts), "".join(think_parts), usage, finish
 
 
 # ══════════════════════════════════════════════════════════════ 离线 Mock

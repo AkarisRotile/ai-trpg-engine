@@ -1,0 +1,332 @@
+# 功能分区图
+#
+# 这个文件是给"动手之前先看这里"用的。
+#
+# 每次改东西慢，大半的时间不是花在改，是花在重新搞清楚
+# "这件事归谁管、动它会不会碰坏别的、改完该怎么验"。
+# 这份表就是答案，别再靠读代码重建一遍。
+#
+# 用法：先看 reverse_index 找到区域 id，再看 regions 里那一条。
+# 每条里 verification 写的是**最小验证**，改完先跑那个，别一上来就跑全套。
+
+version: 2
+updated: 2026-09-19
+layout:
+  engine: engine/          # 纯 Python，永不 import 界面库
+  ui: ui/                  # 只有三个文件，通过 pywebview 桥接调 App
+  data: data/              # 用户的东西，跟着 exe 走，不进 git
+  tools: tools/            # 构建、自检、打包
+  docs: docs/              # 规范与设计
+
+铁律:
+  - id: numbers
+    rule: 引擎负责所有数字。骰子、时间、技能点预算、伤害、理智都由代码算，AI 只说话和做选择。
+    why: 模型算不准。这条已经踩实三次：骰子、时间、车卡预算。
+  - id: layering
+    rule: engine/ 永不 import 界面库；界面只能通过 pywebview 桥接调 App 上的方法。
+    why: 引擎要能脱离界面被自动化测试驱动。
+  - id: examples
+    rule: 提示词里的正例就是规格。举什么例子，模型就学成什么样。
+    why: "「我把椅子挪了挪」+「把烟揣兜里」两条都带「把」，结果一桌人全从「我把」开头。"
+  - id: mechanical
+    rule: 有歧义的毛病交给模型重写，没有歧义的毛病交给代码直接修。
+    why: 破折号、Markdown 加粗、「不是A而是B」代码一定修得对，重写既花钱又不保证。
+  - id: no_reference
+    rule: "参考（严格禁止更新至github）/ 里的第三方预设，禁止二创、入库、进分享包。"
+    why: 那是别人的东西。改完文字跑 tools/leak_sentinel.py。
+
+验证分级:
+  改一行提示词:
+    - 语法：python -c "import ast; ast.parse(open(路径,encoding='utf-8').read())"
+    - 定点：只看那一段的注入有没有生效
+    - 不要打包
+  改引擎逻辑:
+    - tools/selftest_offline.py   # 全量，约一分钟
+  改界面:
+    - node --check ui/app.js
+    - tools/smoke_ui.py           # 真开窗口，从 JS 调 Python 读回 DOM
+  改打包/资源清单:
+    - tools/smoke_exe.py          # 验证打包后的 exe 本身能启动
+  提交前:
+    - tools/leak_sentinel.py + tools/scan_secrets.py
+  要发给朋友:
+    - python tools/build_exe.py && python tools/build_exe.py --portable && python tools/make_share.py
+
+regions:
+
+  - id: dice
+    name: 骰子
+    owns: 出目、成功等级、明骰暗骰、每一颗骰子的原始点数记录
+    files: [engine/dice.py]
+    entry: [check(), DiceKernel.do_check(), DiceKernel.do_roll(), LEVEL_CN]
+    notes:
+      - 随机源是 secrets.SystemRandom，模型碰不到，只能提交"掷什么"的申请。
+      - 成功等级永远以原始技能值为准，难度只决定达标线。
+      - 大失败是 100，或技能值 < 50 时的 96 以上。流传的村规 95 以上不是这里的实现。
+    affects: [turns, agents, chargen]
+    verification: selftest 的【1b】【17】；改成功等级判定要顺手看【14】
+
+  - id: clock
+    name: 桌上的钟
+    owns: 现在是几号、哪天是昨天、守秘人拨钟、开场日怎么定
+    files: [engine/clock.py]
+    entry: [GameClock, resolve_start(), parse_clock_directive(), parse_duration()]
+    notes:
+      - 开场日优先级：模组 start_time → 配置 → KP 研读时挑的日子 → 简介里的日期 → era 年份 → 兜底。
+      - 兜底的月日按模组 id 哈希定，同一模组稳定。以前写死 10 月 3 日，每局日历都一样。
+      - 相对说法由引擎算好摆成对照表，模型只查表不做算术。
+    affects: [turns, prompts, study]
+    verification: selftest 的【11】【16b】
+
+  - id: chargen
+    name: 车卡
+    owns: 属性生成、购点预算、技能点分配与缩放、年龄补正、审卡
+    files: [engine/chargen.py, engine/cardcalc.py]
+    entry: [allocate(), repair_sheet(), audit_sheet(), budget(), skill_value(), build_character_from_sheet()]
+    notes:
+      - 契约是反过来的：AI 写"想要多少"，引擎缩放到预算内。所以超支在结构上不可能。
+      - 权威源是用户那张 COC7 空白卡的职业表，不是引擎里另写的一张。
+      - 两本账：职业点只能花在本职技能上，兴趣点随便花，各削各的。
+      - 硬上限 90，克苏鲁神话恒为 0。
+    affects: [prompts, agents, sheet, turns]
+    verification: selftest 的【2b】【2c】【2d】【14】
+
+  - id: sheet
+    name: 角色卡读写
+    owns: 把引擎算出来的数值填进用户那张 Excel 卡、读回来
+    files: [engine/sheet.py, engine/cardcalc.py]
+    notes: 只往模板里填，不改模板结构。填错列的 bug 以前出过。
+    affects: [chargen, app]
+    verification: selftest 的【2b】
+
+  - id: memory
+    name: 记忆
+    owns: 角色的认知树、跨周目玩家卡、梗的存放
+    files: [engine/memory.py, engine/player_memory.py]
+    entry: [MemoryCard, PlayerCard, PlayerCard.add_meme(), PlayerCard.recall()]
+    notes:
+      - 角色记忆每局清零，玩家记忆跨模组累积。今天当 KP 的人，下一局当调查员，梗还在。
+      - 索引只给名词和一句话；细节要靠 <recall> 去捞，不给就省 token。
+    affects: [agents, turns, memes]
+    verification: selftest 的【5】【17】
+
+  - id: prompts
+    name: 提示词
+    owns: 所有系统提示、语域规范、车卡规范文本、输出格式契约
+    files: [engine/prompts.py]
+    entry: [TABLE_REGISTER, ACT_REGISTER, era_note(), energy_note(), build_pl_system(), build_kp_system(), build_world_message()]
+    notes:
+      - TABLE_REGISTER 要进 PL 主提示词。以前只在车卡和桌边闲聊两处，正式回合一个字都拿不到。
+      - KP_CONTRACT 里的 <state> 是机器指令通道，key yes 用来标关键节点。
+      - 这个文件里**不要出现破折号**。模型每轮都读它，等于一边禁止一边示范。
+    affects: [all]
+    verification: selftest 的【16】【18f】；改完跑 tools/dump_prompts.py 看一眼拼出来的样子
+
+  - id: linter
+    name: 哨兵与机械清洗
+    owns: 元层痕迹检测、语域拦截、能机械修的毛病直接修、静默重写
+    files: [engine/linter.py]
+    entry: [lint(), clean_output(), soft_clean(), drop_antithesis(), kp_overreach(), too_long(), build_repair_instruction()]
+    notes:
+      - clean_output 收口在 agents._call 里，所有模型输出都过这一道。
+      - MACHINE_CHANNELS（state/roll/recall）一个字都不碰，那里面是指令和骰点。
+      - PL 不扫 <think>：内心独白允许推理口吻，扫了会误伤。
+      - 加新规则之前，先拿语料量误伤率（见测量方法）。
+      - 一条正则别塞太多逻辑。"1925—1930 只匹配到 1925"就是这么来的，改成显式函数。
+    affects: [agents, turns]
+    verification: selftest 的【16d】【16e】【18】
+
+  - id: memes
+    name: 梗
+    owns: 跨人重复的短句检测、写进玩家卡
+    files: [engine/memes.py]
+    entry: [MemeWatcher.observe(), MemeWatcher.harvest()]
+    notes:
+      - 梗的定义就是跨人的重复，模型看不见别人说过什么，所以只能引擎数。
+      - 口水词、笑声、叠字、单字都不收；同一句只收一次；同一个人反复念叨不算。
+    affects: [turns, memory]
+    verification: selftest 的【17】
+
+  - id: phrasing
+    name: 句式疲劳
+    owns: 一桌人句子开头撞车
+    files: [engine/phrasing.py]
+    notes:
+      - 只**报事实**，不下指令。world message 刻意不含祈使句，下任务会把模型拉回助手人格。
+      - 结果塞进下一轮的世界消息，让它自己散开。
+    affects: [turns, prompts]
+    verification: selftest 的【18c】【19】
+
+  - id: turns
+    name: 回合流程
+    owns: 一轮怎么走、谁先动、桌边插话、守秘人指令执行、复盘与散场
+    files: [engine/turns.py]
+    entry: [GameLoop.step(), _pl_phase(), _pl_participants(), _table_talk_round(), _one_directive(), _kp_study(), finish()]
+    notes:
+      - 每轮顺序：拨钟 → PL 阶段 → 桌边插话轮 → KP 阶段。
+      - 谁出场按概率抽；守秘人 key yes 标关键节点则全员；被点名的必动。
+      - 插话轮是"先全部生成再一起发出"，所以要做复读去重，不然后面的人照抄前面的。
+      - finish() 是标记结束 + 跨周目复盘 + 解禁模组的总开关。到批次上限或手动停**都不算**结束。
+    affects: [all]
+    verification: selftest 的【4】【8】【12】【17】【19】
+
+  - id: agents
+    name: 智能体
+    owns: PL 与 KP 的行为、输出解析、标签通道、工具轮、调试旁路
+    files: [engine/agents.py]
+    entry: [split_tags(), parse_pl_output(), parse_kp_output(), PLAgent, KPAgent, BaseAgent._call()]
+    notes:
+      - _call 是所有模型输出的唯一收口点，机械清洗在这里。
+      - 标签解析遇到下一个标签就停；闭合标签写歪一点就吞掉后面所有块，裸标签会漏到屏幕上。
+      - 工具轮：模型先写 <roll>/<recall>，引擎立刻掷/捞，它带着真结果重说一遍，临时消息用完就删。
+      - Directive.arg(i) 是 **1-based**。以前是 0-based，于是私聊/handout/场景推进全静默失效。
+    affects: [all]
+    verification: selftest 的【2】【4】【12】【18】
+
+  - id: llm
+    name: 模型接口
+    owns: 三种接口（官方/自定义/离线）、重试、错误人话化、流式
+    files: [engine/llm.py]
+    entry: [make_client(), OpenAICompatClient.chat(), _consume_stream()]
+    notes:
+      - 客户端无状态，历史由 Agent 持有。"历史即身份"是核心机制。
+      - 流式只给调试页用（on_delta）。平时走整包返回，少一层解析。
+    affects: [agents, app]
+    verification: selftest 的【1c】【21】
+
+  - id: rules
+    name: 规则注入与术语
+    owns: 分层注入规则、术语按需补一句话定义
+    files: [engine/rules.py, engine/glossary.py]
+    notes:
+      - lean 常驻约 250 字判定核心，战斗/理智等分节在真用得上时才注入。
+      - 术语触发式：整局每个词只解释一次，比整节重发便宜一个数量级。
+    affects: [prompts, agents]
+    verification: selftest 的【1】
+
+  - id: module
+    name: 模组解析
+    owns: 认标准结构的模组、也认乱格式（.doc/.docx/.xls/.pdf/扫描件）、扫描缓存
+    files: [engine/module_lib.py, engine/docread.py, engine/ocr.py]
+    entry: [load_module(), scan_modules(), warm_scan(), _read()]
+    notes:
+      - scan_modules 有缓存，键是"每个模组目录最新的改动时间 + 文件数"。
+      - 第一次扫描要把每个模组的正文读一遍，23 MB 的模组要七八秒。
+        App 启动时后台预热一次，否则点「模组」八秒白屏，看着像打不开。
+      - 界面上的「刷新」传 force=True 强制重扫。
+    affects: [turns, app, study]
+    verification: selftest 的【2e】【15】【20】
+
+  - id: study
+    name: 研读与防剧透
+    owns: 开局前的功课、研读室、秘密词表、散场解禁
+    files: [engine/study.py, engine/spoiler.py]
+    notes:
+      - 功课写五样：开场日 <clock>、大纲 <spine>、理解、扩展、彩蛋。
+      - 大纲是可校验的：抄下来的场景 id 必须和模组实际的一字不差，对不上就打回重写。
+      - 防剧透两层：事前抽秘密词表，事后扫输出。
+    affects: [turns, prompts]
+    verification: selftest 的【15】
+
+  - id: plugins
+    name: 插件宿主
+    owns: 扫插件目录、启停、读插件资产、把引擎事件派发给插件
+    files: [engine/plugins.py, ui/app.js]
+    entry: [list_plugins(), set_enabled(), read_asset(), enabled_ids()]
+    notes:
+      - 插件在 data/plugins/<id>/，最少一个 plugin.json。
+      - 三种面：modal（独立页面）/ window（悬浮窗）/ panel（右栏标签）。
+      - 不做沙箱（本地单机，插件是用户自己装的）；要挡的是"插件把界面搞崩"，
+        所以插件的 JS 用 new Function 包起来，出错只在管理页标红。
+      - 读资产只给插件自己目录里的文件，不许 ../，不许 .py。
+    affects: [app, ui]
+    verification: selftest 的【21】
+    编写格式: docs/插件编写格式.md
+
+  - id: session
+    name: 会话与存档
+    owns: 一局的状态、续跑、流水、导出
+    files: [engine/session.py]
+    notes: 研读室不是一局，不该混进存档列表。
+    affects: [app, turns]
+    verification: selftest 的【7】
+
+  - id: config
+    name: 配置与名册
+    owns: 全局选项、七个座位、跨周目换庄
+    files: [engine/config.py, engine/roster.py]
+    notes:
+      - 凭据按**人**继承，不按座位。今天当 KP 的汤圆，下一局当调查员，她的 Key 跟着走。
+      - 老配置里的 player_id 失效会自动重映射，结果说给用户听，别让换人发生在暗处。
+    affects: [all]
+    verification: selftest 的【0】【19】
+
+  - id: app
+    name: 桥接门面
+    owns: 界面能调的六十多个方法、事件队列、后台任务、出错记录
+    files: [engine/app.py]
+    notes:
+      - 界面每 400 毫秒 poll_events()，每 2.5 秒 state()。
+      - 长时间操作都扔后台线程，界面靠事件看进度。
+      - type: debug 的事件是给插件看的旁路，不进主流水。
+    affects: [all]
+    verification: selftest 的【13】；真窗口 tools/smoke_ui.py
+
+  - id: ui
+    name: 界面
+    owns: 左栏席位、中间流水、右栏五个标签、七个弹窗、插件管理
+    files: [ui/index.html, ui/app.js, ui/style.css]
+    notes:
+      - app.js 是经典脚本，S 和各个 render 函数都是全局的，evaluate_js 里能直接用。
+      - call() 包着等待提示：慢过 400 毫秒才显示，轮询接口在 NO_BUSY 里排除。
+      - 弹窗按钮的准备工作都包了 try/catch，一个弹窗初始化出错不能连累别的按钮。
+    affects: [app]
+    verification: node --check ui/app.js && tools/smoke_ui.py
+
+  - id: packaging
+    name: 打包与验证
+    owns: exe、便携版、分享包、图标、资源清单
+    files: [tools/build_exe.py, tools/make_share.py, build.ps1, build.bat, main.py]
+    notes:
+      - 打包会覆盖根目录的 exe。**App 开着的时候会失败**（PermissionError），先关掉。
+      - 加了新的 engine 模块，要记得进 build_exe.py 的 HIDDEN 列表。
+      - 分享包会跑泄漏哨兵和密钥扫描，不干净就不出包。
+      - ui/ 是打进 _internal 的；data/ 在 exe 同级，升级不动它。
+    affects: []
+    verification: tools/smoke_exe.py
+
+  - id: errlog
+    name: 出错记录
+    owns: 界面报错和引擎异常落盘
+    files: [engine/errlog.py]
+    notes: 写盘前会擦掉 sk- / ghp_ / Bearer，别让 Key 进日志。
+    affects: [app]
+    verification: selftest 的【13】
+
+reverse_index:
+  骰子出目不对 / 成功等级不对: dice
+  日期不对 / 都说成昨天: clock
+  技能点超支 / 90 上限 / 职业区间: chargen
+  角色卡 Excel 填错列: sheet
+  记忆丢了 / 跨周目不认识人: memory
+  说话腔调不对 / 八股 / 破折号: prompts → linter
+  模型输出里出现裸标签: agents
+  「不是A而是B」漏出来: linter
+  守秘人替玩家说话: linter (kp_overreach) → prompts (KP_PRINCIPLES)
+  一桌人句子开头都一样: phrasing
+  一句话被当成梗: memes
+  谁该说话 / 谁不该说话: turns (_pl_participants)
+  一整轮没人动: turns (_pl_participants) → prompts (key yes)
+  自动暂停被当成结局 / 模组提前解禁: turns (finish) → app (run_auto / step)
+  点模组卡好久: module (scan_modules 缓存 + warm_scan)
+  界面某个按钮点了没反应: ui (bind 里的 try/catch) → app (出错记录面板)
+  插件加载不了 / 想加插件: plugins
+  打包失败 / exe 起不来: packaging
+
+测量方法:
+  语料误伤:
+    语料在哪: E:\QQ聊天记录\_语料\（仓库外，51 个群的 jsonl + 哔哩哔哩评论）
+    怎么量: python .selftest/napcat/lint_fp.py
+    看什么: 命中率要接近零，漏抓要为零
+  提示词拼出来长什么样:
+    python tools/dump_prompts.py

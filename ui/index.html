@@ -25,6 +25,8 @@
     <button class="btn ghost" data-modal="modalRules">📖 规则</button>
     <button class="btn ghost" data-modal="modalSessions">💾 存档</button>
     <button class="btn ghost" data-modal="modalSettings">⚙️ 设置</button>
+    <span id="pluginButtons" class="plugin-buttons"></span>
+    <button class="btn ghost" data-modal="modalPlugins">🧩 插件</button>
   </div>
 </header>
 
@@ -397,6 +399,36 @@
   </div>
 </div>
 
+<!-- ══════════════════════════ 弹窗：插件 ══════════════════════════ -->
+<div class="modal" id="modalPlugins">
+  <div class="modal-box">
+    <header class="modal-head">
+      <h3>🧩 插件</h3>
+      <button class="btn tiny ghost" data-close>✕</button>
+    </header>
+    <div class="modal-body">
+      <div class="notice">
+        一个插件就是 <code>data/plugins/&lt;id&gt;/</code> 里的一个文件夹，
+        最少要有一个 <code>plugin.json</code>。
+        插件可以有自己的页面、悬浮窗，或者挂到右栏当一个标签页。
+        <br>· 插件跑在这个窗口里，能碰到界面，也能调引擎。
+        它是<b>你自己装的代码</b>，所以别装来路不明的。
+        <br>· 插件出错不会把界面带崩，只会在下面标红，可以一键关掉。
+      </div>
+      <div class="row-between">
+        <span class="hint" id="pluginsPath"></span>
+        <span class="spacer"></span>
+        <button class="btn tiny" id="btnOpenPluginsDir">📂 打开插件目录</button>
+        <button class="btn tiny" id="btnReloadPlugins">↻ 重新扫描</button>
+      </div>
+      <div id="pluginList" class="plugin-list"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 插件自己的页面 / 悬浮窗都挂在这里 -->
+<div id="pluginSurfaces"></div>
+
 <!-- ══════════════════════════ 弹窗：研读室 ══════════════════════════ -->
 <div class="modal" id="modalStudy">
   <div class="modal-box wide">
@@ -445,6 +477,9 @@
   </div>
 </div>
 
+<div id="busy" class="busy">
+  <span class="spin"></span><span id="busyText">处理中</span>
+</div>
 <div id="toasts" class="toasts"></div>
 <script src="app.js"></script>
 </body>

@@ -7,6 +7,7 @@ PL 的编译路径根本不会触碰它——不是"提示模型别说"，而是
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -423,13 +424,68 @@ def _split_scanned(text: str, min_chars: int = 1400,
     return out or _split_by_length(text, "scene", chunks=4)
 
 
-def scan_modules() -> list[dict[str, Any]]:
-    """轻量扫描：只读元数据，不读全场正文——模组多了也不卡界面。
+# 扫描结果缓存。键是"每个模组目录里最新的改动时间 + 文件数"。
+# 为什么要缓存：bootstrap() 每开一次弹窗就会调到这里，而 load_module()
+# 要把整个模组的正文读一遍。一个 23 MB 的模组就要 7 秒，
+# 用户点「模组」之后界面八秒没反应，看着就是打不开。
+# 模组多了会更糟，所以不能再每次重扫。
+_SCAN_CACHE: dict[str, Any] = {"key": None, "mods": []}
+_SCAN_LOCK = threading.Lock()
+
+
+def _scan_key(root: Path) -> tuple:
+    """目录指纹。只 stat，不读内容，很快。"""
+    out = []
+    try:
+        children = sorted(root.iterdir(), key=lambda x: x.name)
+    except OSError:
+        return ()
+    for p in children:
+        if p.name.startswith("."):
+            continue
+        try:
+            if p.is_file():
+                out.append((p.name, round(p.stat().st_mtime, 1), 1))
+                continue
+            if not p.is_dir():
+                continue
+            newest, count = 0.0, 0
+            for f in p.rglob("*"):
+                if not f.is_file():
+                    continue
+                count += 1
+                try:
+                    newest = max(newest, f.stat().st_mtime)
+                except OSError:
+                    pass
+            out.append((p.name, round(newest, 1), count))
+        except OSError:
+            continue
+    return tuple(out)
+
+
+def scan_modules(force: bool = False) -> list[dict[str, Any]]:
+    """扫描模组。只读元数据，不读全场正文。
 
     既认文件夹，也认直接丢在 `data\\modules\\` 根目录下的单个文件。
+
+    默认走缓存：目录没变就直接返回上次的结果，界面立刻能开。
+    界面上那个「刷新」按钮传 force=True，强制重扫。
     """
-    out: list[dict[str, Any]] = []
     root = cfgmod.modules_root()
+    key = _scan_key(root)
+    if not force and _SCAN_CACHE["key"] == key:
+        return list(_SCAN_CACHE["mods"])
+
+    with _SCAN_LOCK:
+        # 双检：等锁这段时间里，别人（比如启动预热那个线程）可能已经扫完了
+        if not force and _SCAN_CACHE["key"] == key:
+            return list(_SCAN_CACHE["mods"])
+        return _scan_modules_locked(root, key, force)
+
+
+def _scan_modules_locked(root: Path, key: tuple, force: bool) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
     entries: list[Path] = []
     for p in sorted(root.iterdir(), key=lambda x: x.name):
         if p.name.startswith("."):
@@ -456,7 +512,22 @@ def scan_modules() -> list[dict[str, Any]]:
             "scenes": [{"id": s.id, "title": s.title} for s in m.scenes],
             "warnings": m.warnings,
         })
+    _SCAN_CACHE["key"] = key
+    _SCAN_CACHE["mods"] = out
     return out
+
+
+def warm_scan() -> None:
+    """后台预热一次扫描。
+
+    第一次扫描要把每个模组的正文都读一遍，一个大模组就要七八秒。
+    用户点「模组」时界面八秒没反应，看着就是打不开。
+    所以在程序启动时先偷偷跑掉，等真点的时候就是瞬间。
+    """
+    try:
+        scan_modules()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def ensure_demo_module() -> None:

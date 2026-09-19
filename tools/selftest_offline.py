@@ -89,6 +89,11 @@ def main() -> int:
     src_rules = ROOT / "data" / "rules"
     if src_rules.is_dir():
         shutil.copytree(src_rules, data / "rules", dirs_exist_ok=True)
+    # 内置插件也带过去。测试跑在临时 data 目录里，
+    # 不带的话【21】段测的是个空目录。
+    src_plugins = ROOT / "data" / "plugins"
+    if src_plugins.is_dir():
+        shutil.copytree(src_plugins, data / "plugins", dirs_exist_ok=True)
 
     cfg = cfgmod.default_config()
     seats = [cfgmod.make_kp_seat()] + [cfgmod.make_pl_seat(i) for i in range(3)]
@@ -1586,6 +1591,133 @@ def main() -> int:
     check([d.kind for d in kp_out_no.directives] == ["key"], "key no 也认")
     check("key yes" in prompts_mod.KP_CONTRACT,
           "守秘人提示词里写了怎么标关键节点")
+
+    # ══════════════════════════════════════════ 20. 模组页别卡住
+    print("\n【20】模组扫描：不能再让界面点开就是八秒白屏")
+
+    from engine import module_lib as ml_mod
+
+    t0 = time.time()
+    ml_mod.scan_modules(force=True)
+    cold = time.time() - t0
+    t0 = time.time()
+    ml_mod.scan_modules()
+    warm = time.time() - t0
+    check(warm < 0.2, "第二次扫描走缓存，接近瞬间",
+          f"冷 {cold:.2f}s → 暖 {warm:.3f}s")
+    check(warm * 5 < cold or cold < 0.2, "缓存确实省掉了重复读盘",
+          f"冷 {cold:.2f}s → 暖 {warm:.3f}s")
+    check(callable(getattr(ml_mod, "warm_scan", None)),
+          "有后台预热这个入口")
+    # 预热必须能容错（目录不存在、权限不对都不该把启动带崩）
+    try:
+        ml_mod.warm_scan()
+        warm_ok = True
+    except Exception:  # noqa: BLE001
+        warm_ok = False
+    check(warm_ok, "预热失败也不会把程序带崩")
+
+    # 界面那边得说清楚在等什么，而不是点了没反应
+    _ui2 = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+    _html2 = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
+    check('id="busy"' in _html2, "界面上有等待提示这个元素")
+    check("CALL_LABELS" in _ui2 and "守秘人在通读模组" in _ui2,
+          "慢操作有各自的说明文字")
+    check("NO_BUSY" in _ui2, "轮询接口被排除在等待提示之外")
+
+    # ══════════════════════════════════════════ 21. 插件宿主
+    print("\n【21】插件宿主：装得上、关得掉、越界读不到")
+
+    from engine import plugins as plug_mod
+
+    proot = plug_mod.plugins_root()
+    check(proot == cfgmod.data_root() / "plugins",
+          "插件装在数据目录下的 plugins/ 里（升级 exe 不会丢）", str(proot))
+
+    # 第一个插件：思维链查看器
+    items = plug_mod.list_plugins()
+    tv = next((p for p in items if p.id == "thinking-viewer"), None)
+    check(tv is not None, "扫到了内置的思维链查看器")
+    if tv:
+        check(tv.surface == "window", "它要的是一个悬浮窗", tv.surface)
+        check(tv.name and not tv.error, "清单读得动、没有报错", tv.error or tv.name)
+        check(tv.engine_options.get("debug_stream") is True,
+              "它要求引擎打开调试旁路", str(tv.engine_options))
+        check(bool(tv.entry_page and tv.entry_script),
+              "入口文件和脚本都填了", f"{tv.entry_page} / {tv.entry_script}")
+
+    # 读插件自己的文件
+    r = plug_mod.read_asset("thinking-viewer", "page.html")
+    check(r.get("ok") and "tvPanes" in (r.get("data") or ""), "读得到插件的页面")
+    r = plug_mod.read_asset("thinking-viewer", "ui.js")
+    check(r.get("ok") and "DSH.on" in (r.get("data") or ""), "读得到插件的脚本")
+
+    # 越界和不合法的东西一律挡住
+    check(not plug_mod.read_asset("thinking-viewer", "../../data/config.json").get("ok"),
+          "不许拿 ../ 爬到插件目录外面")
+    check(not plug_mod.read_asset("../../x", "page.html").get("ok"),
+          "插件 id 不合法就不给读")
+    check(not plug_mod.read_asset("thinking-viewer", "ui.py").get("ok"),
+          "不给读 .py 这类不该由界面取的文件")
+    check(not plug_mod.read_asset("thinking-viewer", "没这个文件.html").get("ok"),
+          "文件不存在时报错而不是抛异常")
+
+    # 开关能存能读
+    st = plug_mod.load_state()
+    plug_mod.save_state({**st, "probe_plugin": True})
+    check(plug_mod.load_state().get("probe_plugin") is True, "启停状态存得下去")
+    plug_mod.save_state({k: v for k, v in st.items() if k != "probe_plugin"})
+    check("probe_plugin" not in plug_mod.load_state(), "启停状态撤得掉")
+
+    # 坏清单不能把整个扫描带崩
+    bad_dir = proot / "zz_broken_probe"
+    bad_dir.mkdir(parents=True, exist_ok=True)
+    (bad_dir / "plugin.json").write_text("{ 这不是 json", encoding="utf-8")
+    try:
+        items2 = plug_mod.list_plugins()
+        got_bad = next((p for p in items2 if p.id == "zz_broken_probe"), None)
+        check(got_bad is not None and bool(got_bad.error),
+              "坏清单被单独标红，没有把扫描带崩")
+        check(any(p.id == "thinking-viewer" for p in items2),
+              "坏清单存在时，好插件照样扫得到")
+        check(plug_mod.set_enabled("zz_broken_probe", True).get("ok") is False,
+              "坏插件不给开")
+    finally:
+        shutil.rmtree(bad_dir, ignore_errors=True)
+
+    check(plug_mod.set_enabled("根本不存在的插件", True).get("ok") is False,
+          "开一个不存在的插件会被人话拒绝")
+
+    # 界面那边得有三种"面"和管理页
+    _ui3 = (ROOT / "ui" / "app.js").read_text(encoding="utf-8")
+    _html3 = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
+    check('id="modalPlugins"' in _html3, "界面上有插件管理页")
+    check('id="pluginSurfaces"' in _html3, "有给插件挂页面/悬浮窗的容器")
+    for mark in ("buildPluginSurface", "runPluginScript", "dispatchToPlugins",
+                 "makeDraggable", "PLUGIN_ERRORS"):
+        check(mark in _ui3, f"界面实现了「{mark}」")
+    check("'plugin:'" in _ui3 and "syncRightTabs" in _ui3,
+          "插件可以挂到右栏当一个标签页")
+
+    # 流式解析
+    from engine.llm import OpenAICompatClient
+
+    class _FakeSSE:
+        def iter_lines(self, decode_unicode=False):
+            for ln in (b'data: {"choices":[{"delta":{"content":"\\u4f60"}}]}',
+                       b"", b"data: not json", b"",
+                       b'data: {"choices":[{"delta":{"content":"\\u597d"},'
+                       b'"finish_reason":"stop"}],"usage":{"prompt_tokens":5}}',
+                       b"", b"data: [DONE]"):
+                yield ln
+
+    seen: list[str] = []
+    txt, _think, usage, fin = OpenAICompatClient._consume_stream(_FakeSSE(), seen.append)
+    check(txt == "你好" and seen == ["你", "好"], "SSE 流式解析出正确的正文与逐段回调",
+          f"{txt!r} {seen}")
+    check(usage.get("prompt_tokens") == 5 and fin == "stop",
+          "流式也能拿到 usage 和结束原因")
+    check("坏行" not in txt, "流里的坏行被跳过，不会把整次调用搞失败")
 
     # ══════════════════════════════════════════ 汇总
     print("\n" + "=" * 70)

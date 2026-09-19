@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import chargen, config as cfgmod, glossary, module_lib, player_memory
+from . import plugins as plugins_mod
 from . import rules as rules_mod
 from . import errlog
 from .llm import LLMError, probe_seat
@@ -46,6 +47,12 @@ class App:
         self._auto = threading.Event()
         self._busy = threading.Lock()
         self.last_job_error = ""
+
+        # 启动就把模组扫描先跑掉。第一次扫描要把每个模组的正文读一遍，
+        # 一个大模组要七八秒；等用户点「模组」时才扫，界面八秒没反应，
+        # 看着就是打不开。放在后台线程里，不挡启动。
+        threading.Thread(target=module_lib.warm_scan, daemon=True,
+                         name="coc-warm-scan").start()
 
     # ══════════════════════════════════════════════ 事件
 
@@ -328,6 +335,29 @@ class App:
         if not m:
             return {"ok": False, "message": f"找不到模组 {module_id}"}
         return {"ok": True, "module": m.to_dict()}
+
+    # ══════════════════════════════════════════════ 插件
+
+    def list_plugins(self) -> dict[str, Any]:
+        """插件清单。界面上的插件管理页和顶栏按钮都靠它。"""
+        try:
+            items = [p.to_dict() for p in plugins_mod.list_plugins()]
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "message": f"扫插件目录出错：{e}", "plugins": []}
+        return {"ok": True, "plugins": items,
+                "root": str(plugins_mod.plugins_root())}
+
+    def set_plugin_enabled(self, plugin_id: str, enabled: bool) -> dict[str, Any]:
+        """开关插件。开的时候顺带把它要求的引擎选项设上。"""
+        return plugins_mod.set_enabled(plugin_id, bool(enabled))
+
+    def plugin_asset(self, plugin_id: str, path: str) -> dict[str, Any]:
+        """读插件自己的一个文件（page.html / ui.js / 图片）。"""
+        return plugins_mod.read_asset(plugin_id, path)
+
+    def open_plugins_folder(self) -> dict[str, Any]:
+        plugins_mod.plugins_root().mkdir(parents=True, exist_ok=True)
+        return self._open_folder(plugins_mod.plugins_root())
 
     def open_player_folder(self, player_id: str) -> dict[str, Any]:
         """打开某个玩家的专属文件夹（记忆 + 角色卡都在里面）。"""

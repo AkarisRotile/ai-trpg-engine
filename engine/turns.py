@@ -172,6 +172,7 @@ class GameLoop:
                 setting=self._setting(),
             )
             agent.kernel = self.kernel      # AI 只能通过它申请掷骰
+            agent.debug_emit = self._debug if self.options.get("debug_stream") else None
             self.pls.append(agent)
 
     def _ensure_kp(self) -> None:
@@ -187,6 +188,20 @@ class GameLoop:
             setting=self._setting(),
         )
         self.kp.kernel = self.kernel
+        self.kp.debug_emit = self._debug if self.options.get("debug_stream") else None
+
+    # ══════════════════════════════════════════════ 调试旁路
+
+    def _debug(self, payload: dict[str, Any]) -> None:
+        """把模型正在写的东西推给界面。只有开了调试旁路才走这里。
+
+        这条流是给「思维链查看器」那个插件用的：
+        要查"是哪一步把话写坏了"，就得看得见原始输出和清洗后的差别。
+        """
+        self._e("debug", payload.get("text") or "",
+                name=payload.get("seat") or "",
+                seat_id=payload.get("seat_id") or "",
+                meta=payload)
 
     @staticmethod
     def _player_of(agent: Any) -> str:

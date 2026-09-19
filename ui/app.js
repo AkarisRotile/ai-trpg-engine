@@ -83,11 +83,85 @@ window.addEventListener('unhandledrejection', (e) => {
     (r && r.stack) || '');
 });
 
+// 界面上每个会等的操作都说清楚在等什么。
+// 以前点了「模组」八秒没反应，看着就是坏了——那其实是引擎在读 23 MB 的模组正文。
+const CALL_LABELS = {
+  bootstrap: '载入中',
+  module_detail: '读模组',
+  study_room: '守秘人在通读模组',
+  study_ask: '守秘人在想',
+  list_studies: '看研读记录',
+  forget_study: '清掉研读记录',
+  prepare: '准备开局',
+  start: '守秘人开场',
+  step: '推进一轮',
+  run_auto: '自动推进',
+  finish: '散场',
+  new_session: '建新局',
+  load_session: '载入存档',
+  resume_last: '接回上一局',
+  list_sessions: '读存档列表',
+  save_now: '存档',
+  export_markdown: '导出',
+  fetch_models: '拉取模型列表',
+  probe: '测试连接',
+  probe_all: '测试全部连接',
+  probe_pdf: '看这个 PDF',
+  ocr_pdf: '识别扫描件（可能要一两分钟）',
+  get_roster: '读名册',
+  save_roster: '存名册',
+  assign_roles: '换站位',
+  rotate_keeper: '轮换守秘人',
+  refreshModelsLazy: '载入中',
+  player_cards: '读玩家卡',
+  player_card: '读玩家卡',
+  save_player_card: '存玩家卡',
+  search_rules: '翻规则书',
+  open_player_folder: '开文件夹',
+  open_seat_folder: '开文件夹',
+  open_modules_folder: '开文件夹',
+};
+
+let _busySeq = 0;
+let _busyTimer = null;
+let _busySince = 0;
+
+function busyOff(seq) {
+  if (seq !== _busySeq) return;      // 已经有更新的调用了，别关错
+  clearTimeout(_busyTimer);
+  $('busy').classList.remove('on');
+}
+
+// 这几个人家自己每隔几百毫秒调一次，而且都是瞬间返回的。
+// 让它们参与进度条只会打架：长调用的显示会被它们的计时器冲掉。
+const NO_BUSY = new Set(['poll_events', 'state', 'busy', 'wait_idle',
+                         'recent_errors', 'dice_log', 'transcript',
+                         'list_sessions', 'player_cards', 'glossary_terms',
+                         'module_study', 'study_state', 'vision_settings']);
+
 async function call(method, ...args) {
   if (!bridgeReady()) throw new Error('界面桥接还没就绪，请稍等一秒再试。');
   const fn = window.pywebview.api[method];
   if (typeof fn !== 'function') throw new Error(`引擎没有提供方法 ${method}`);
-  return await fn(...args);
+  if (NO_BUSY.has(method)) return await fn(...args);
+
+  const seq = ++_busySeq;
+  const label = CALL_LABELS[method] || '处理中';
+  // 慢过 400 毫秒才显示。瞬间返回的调用（比如已经预热过的 bootstrap）
+  // 要是也闪一下进度条，反而更吵。
+  clearTimeout(_busyTimer);
+  _busyTimer = setTimeout(() => {
+    if (seq !== _busySeq) return;
+    $('busyText').textContent = label;
+    $('busy').classList.add('on');
+    _busySince = Date.now();
+  }, 400);
+
+  try {
+    return await fn(...args);
+  } finally {
+    busyOff(seq);
+  }
 }
 
 /* ══════════════════════════ 小工具 ══════════════════════════ */
@@ -326,6 +400,22 @@ function renderSeats() {
 async function renderRight() {
   const body = $('rightBody');
   body.innerHTML = '';
+  syncRightTabs();
+
+  // 插件挂上来的标签页：把它的节点搬进右栏。
+  // 注意这里是**移动**节点，不是重新渲染，插件的状态不会丢。
+  if (S.rightTab && S.rightTab.startsWith('plugin:')) {
+    const pid = S.rightTab.slice(7);
+    const rec = PLUGIN_OPEN.get(pid);
+    const p = PLUGINS.find((x) => x.id === pid);
+    if (!rec || !p || !p.enabled) {
+      body.appendChild(el('div', 'empty', '这个插件没开着。'));
+      return;
+    }
+    body.appendChild(rec.node);
+    return;
+  }
+
   if (!S.activeSeat) {
     body.appendChild(el('div', 'empty', '选择左侧一个席位查看详情'));
     return;
@@ -338,6 +428,19 @@ async function renderRight() {
   if (S.rightTab === 'player') return renderPlayerTab(body, seat);
   if (S.rightTab === 'dice') return renderDice(body, seat);
   if (S.rightTab === 'cost') return renderCost(body, seat);
+}
+
+/** 右栏标签栏：内置那五个 + 每个开着的 panel 插件一个。 */
+function syncRightTabs() {
+  const bar = $('rightTabs');
+  if (!bar) return;
+  bar.querySelectorAll('.tab.plugin-tab').forEach((n) => n.remove());
+  PLUGINS.filter((p) => p.enabled && !p.error && p.surface === 'panel').forEach((p) => {
+    const t = el('div', 'tab plugin-tab', '🧩 ' + (p.name || p.id));
+    t.dataset.tab = 'plugin:' + p.id;
+    if (S.rightTab === 'plugin:' + p.id) t.classList.add('active');
+    bar.appendChild(t);
+  });
 }
 
 async function renderDice(box, seat) {
@@ -714,10 +817,15 @@ async function pollEvents() {
   try {
     const evts = await call('poll_events');
     if (evts && evts.length) {
-      evts.forEach(addEntry);
-      if (evts.some((e) => e.type === 'chargen' || e.type === 'scene')) {
-        refreshState();
+      // 「debug」是给插件看的旁路事件，不进主流水（不然会刷屏）
+      const shown = evts.filter((e) => e.type !== 'debug');
+      if (shown.length) {
+        shown.forEach(addEntry);
+        if (shown.some((e) => e.type === 'chargen' || e.type === 'scene')) {
+          refreshState();
+        }
       }
+      dispatchToPlugins(evts);
     }
   } catch (e) { /* 桥接未就绪时静默 */ }
 }
@@ -1650,21 +1758,288 @@ async function refreshSessions() {
   });
 }
 
+/* ══════════════════════════ 插件 ══════════════════════════ */
+
+let PLUGINS = [];
+let PLUGIN_ROOT = '';
+// 打开着的插件：id -> {surface, node, api}
+const PLUGIN_OPEN = new Map();
+// 插件订阅的事件回调：id -> [fn]
+const PLUGIN_SUBS = new Map();
+// 出过错的插件：id -> 错误文字。出错了就在管理页标红。
+const PLUGIN_ERRORS = new Map();
+
+async function refreshPlugins() {
+  try {
+    const r = await call('list_plugins');
+    PLUGINS = (r && r.plugins) || [];
+    PLUGIN_ROOT = (r && r.root) || '';
+  } catch (e) {
+    PLUGINS = [];
+    reportClientError('读插件清单失败', e && e.stack);
+  }
+  $('pluginsPath').textContent = PLUGIN_ROOT;
+  renderPlugins();
+  syncPluginSurfaces();
+}
+
+function renderPlugins() {
+  const box = $('pluginList');
+  box.innerHTML = '';
+  if (!PLUGINS.length) {
+    box.appendChild(el('div', 'empty',
+      '还没有插件。点上面「打开插件目录」，把插件文件夹丢进去，再点「重新扫描」。'));
+    return;
+  }
+  PLUGINS.forEach((p) => {
+    const c = el('div', 'plugin-card' + (p.enabled ? ' on' : '') +
+      (p.error || PLUGIN_ERRORS.has(p.id) ? ' bad' : ''));
+    const head = el('div', 'row-between');
+    head.appendChild(el('b', null, (p.enabled ? '🧩 ' : '⬜ ') + (p.name || p.id)));
+    const right = el('span', 'spacer');
+    head.appendChild(right);
+
+    const openBtn = el('button', 'btn tiny' + (p.enabled ? '' : ' ghost'),
+      p.surface === 'panel' ? '在右栏打开' : '打开');
+    openBtn.disabled = !p.enabled || !!p.error;
+    openBtn.onclick = () => openPlugin(p.id);
+    head.appendChild(openBtn);
+
+    const tg = el('button', 'btn tiny' + (p.enabled ? ' danger' : ''), p.enabled ? '停用' : '启用');
+    tg.disabled = !!p.error;
+    tg.onclick = async () => {
+      tg.disabled = true;
+      const r = await call('set_plugin_enabled', p.id, !p.enabled);
+      toast(r.message || (p.enabled ? '已停用' : '已启用'), r.ok ? 'ok' : 'err');
+      if (!r.ok && p.enabled) closePlugin(p.id);
+      await refreshPlugins();
+    };
+    head.appendChild(tg);
+    c.appendChild(head);
+
+    const bits = [];
+    if (p.version) bits.push('v' + p.version);
+    if (p.author) bits.push(p.author);
+    bits.push({ modal: '独立页面', window: '悬浮窗', panel: '右栏标签' }[p.surface] || p.surface);
+    c.appendChild(el('div', 'm', bits.join(' · ')));
+    if (p.description) c.appendChild(el('div', 's', p.description));
+
+    const err = p.error || PLUGIN_ERRORS.get(p.id);
+    if (err) c.appendChild(el('div', 'warns', err));
+    box.appendChild(c);
+  });
+}
+
+/** 顶栏给非 panel 的插件挂按钮。panel 的挂到右栏标签上。 */
+function syncPluginSurfaces() {
+  // 关掉已经停用/删掉的插件的界面
+  PLUGIN_OPEN.forEach((_v, id) => {
+    const p = PLUGINS.find((x) => x.id === id);
+    if (!p || !p.enabled) closePlugin(id);
+  });
+  renderPluginButtons();
+}
+
+function renderPluginButtons() {
+  const bar = $('pluginButtons');
+  if (!bar) return;
+  bar.innerHTML = '';
+  PLUGINS.filter((p) => p.enabled && !p.error && p.surface !== 'panel').forEach((p) => {
+    const b = el('button', 'btn ghost', '🧩 ' + (p.name || p.id));
+    b.onclick = () => openPlugin(p.id);
+    bar.appendChild(b);
+  });
+}
+
+async function openPlugin(id) {
+  const p = PLUGINS.find((x) => x.id === id);
+  if (!p || !p.enabled) return;
+  if (PLUGIN_OPEN.has(id)) { focusPlugin(id); return; }
+
+  let html = '';
+  let js = '';
+  try {
+    if (p.page) {
+      const r = await call('plugin_asset', id, p.page);
+      if (!r.ok) throw new Error(r.message);
+      html = r.data;
+    }
+    if (p.script) {
+      const r = await call('plugin_asset', id, p.script);
+      if (!r.ok) throw new Error(r.message);
+      js = r.data;
+    }
+  } catch (e) {
+    PLUGIN_ERRORS.set(id, '读插件文件失败：' + e.message);
+    renderPlugins();
+    toast(`${p.name || id} 读不出来：${e.message}`, 'err');
+    return;
+  }
+
+  const node = buildPluginSurface(p);
+  node.querySelector('.plugin-body').innerHTML = html ||
+    '<div class="empty">这个插件没有自己的页面，它可能只订阅事件。</div>';
+  PLUGIN_OPEN.set(id, { surface: p.surface, node, api: null });
+  PLUGIN_SUBS.set(id, []);
+  $('pluginSurfaces').appendChild(node);
+
+  if (js) runPluginScript(id, js, node);
+  renderPluginButtons();
+  if (p.surface === 'panel') renderRight();
+}
+
+/** 按 surface 造不同的外壳。 */
+function buildPluginSurface(p) {
+  const title = p.name || p.id;
+  if (p.surface === 'panel') {
+    const n = el('div', 'plugin-panel');
+    n.dataset.plugin = p.id;
+    return n;
+  }
+  if (p.surface === 'window') {
+    const n = el('div', 'plugin-win');
+    n.dataset.plugin = p.id;
+    const head = el('div', 'plugin-win-head');
+    head.appendChild(el('span', null, '🧩 ' + title));
+    const sp = el('span', 'spacer'); head.appendChild(sp);
+    const x = el('button', 'btn tiny ghost', '✕');
+    x.onclick = () => closePlugin(p.id);
+    head.appendChild(x);
+    n.appendChild(head);
+    n.appendChild(el('div', 'plugin-body'));
+    makeDraggable(n, head);
+    return n;
+  }
+  const n = el('div', 'plugin-modal');
+  n.dataset.plugin = p.id;
+  const box = el('div', 'plugin-modal-box');
+  const head = el('header', 'modal-head');
+  head.appendChild(el('h3', null, '🧩 ' + title));
+  const x = el('button', 'btn tiny ghost', '✕');
+  x.onclick = () => closePlugin(p.id);
+  head.appendChild(x);
+  box.appendChild(head);
+  box.appendChild(el('div', 'plugin-body'));
+  n.appendChild(box);
+  n.onclick = (e) => { if (e.target === n) closePlugin(p.id); };
+  return n;
+}
+
+function focusPlugin(id) {
+  const rec = PLUGIN_OPEN.get(id);
+  if (!rec) return;
+  if (rec.surface === 'panel') { S.rightTab = 'plugin:' + id; renderRight(); return; }
+  rec.node.style.zIndex = String(900 + (Date.now() % 90));
+}
+
+function closePlugin(id) {
+  const rec = PLUGIN_OPEN.get(id);
+  if (!rec) return;
+  try { rec.node.remove(); } catch (e) { /* 已经没了 */ }
+  PLUGIN_OPEN.delete(id);
+  PLUGIN_SUBS.delete(id);
+  renderPluginButtons();
+  if (S.rightTab === 'plugin:' + id) { S.rightTab = 'chronicle'; renderRight(); }
+}
+
+/** 让悬浮窗能拖。挂在标题栏上。 */
+function makeDraggable(node, handle) {
+  let sx = 0, sy = 0, ox = 0, oy = 0, on = false;
+  handle.style.cursor = 'move';
+  handle.onmousedown = (e) => {
+    if (e.target.closest('button')) return;
+    on = true;
+    sx = e.clientX; sy = e.clientY;
+    const r = node.getBoundingClientRect();
+    ox = r.left; oy = r.top;
+    node.style.right = 'auto';
+    node.style.left = ox + 'px';
+    node.style.top = oy + 'px';
+    e.preventDefault();
+  };
+  window.addEventListener('mousemove', (e) => {
+    if (!on) return;
+    node.style.left = (ox + e.clientX - sx) + 'px';
+    node.style.top = Math.max(0, oy + e.clientY - sy) + 'px';
+  });
+  window.addEventListener('mouseup', () => { on = false; });
+}
+
+/** 跑插件的 ui.js。
+ *
+ * 用一个函数包起来，插件里的语法错误或初始化异常只会把它自己标红，
+ * 不会把整个界面带崩。
+ */
+function runPluginScript(id, code, node) {
+  const api = {
+    id,
+    root: PLUGIN_ROOT + '/' + id,
+    node,
+    body: node.querySelector('.plugin-body'),
+    call: (m, ...a) => call(m, ...a),
+    toast,
+    el,
+    esc,
+    /** 订阅引擎事件。ev 是 {type, text, name, seat_id, meta}。 */
+    onEvent: (fn) => {
+      const list = PLUGIN_SUBS.get(id) || [];
+      list.push(fn);
+      PLUGIN_SUBS.set(id, list);
+    },
+    on: (type, fn) => api.onEvent((ev) => { if (ev.type === type) fn(ev); }),
+    debug: (...a) => console.log('[plugin:' + id + ']', ...a),
+  };
+  const rec = PLUGIN_OPEN.get(id);
+  if (rec) rec.api = api;
+  try {
+    const fn = new Function('DSH', '"use strict";\n' + code + '\n');
+    fn(api);
+    PLUGIN_ERRORS.delete(id);
+  } catch (e) {
+    PLUGIN_ERRORS.set(id, '插件脚本出错：' + (e && e.message ? e.message : e));
+    reportClientError('插件 ' + id + ' 出错', e && e.stack);
+    renderPlugins();
+  }
+}
+
+/** 把引擎事件派发给订阅了的插件。由主循环在处理完事件之后调。 */
+function dispatchToPlugins(evts) {
+  if (!PLUGIN_SUBS.size) return;
+  PLUGIN_SUBS.forEach((subs, id) => {
+    if (!subs.length) return;
+    subs.forEach((fn) => {
+      evts.forEach((ev) => {
+        try { fn(ev); } catch (e) {
+          PLUGIN_ERRORS.set(id, '插件处理事件出错：' + (e && e.message ? e.message : e));
+        }
+      });
+    });
+  });
+}
+
 /* ══════════════════════════ 事件绑定 ══════════════════════════ */
 
 function bind() {
   document.querySelectorAll('[data-modal]').forEach((b) => {
     b.onclick = async () => {
-      const id = b.dataset.modal;
-      if (id === 'modalSettings') renderSettings();
-      if (id === 'modalRoster') { await refreshRoster(); }
-      if (id === 'modalModule') { await refreshModules(); }
-      if (id === 'modalNewGame') { await openNewGame(); return; }
-      if (id === 'modalPlayers') { await refreshPlayers(); }
-      if (id === 'modalRules') { await refreshRules(); }
-      if (id === 'modalSessions') { await refreshSessions(); }
-      if (id === 'modalStudy') { await openStudyRoom(); return; }
-      openModal(id);
+      // 每个按钮的准备工作都包一层：某一个弹窗的初始化出错，
+      // 不能连累其他按钮点了没反应。
+      try {
+        const id = b.dataset.modal;
+        if (id === 'modalSettings') renderSettings();
+        if (id === 'modalRoster') { await refreshRoster(); }
+        if (id === 'modalModule') { await refreshModules(); }
+        if (id === 'modalPlugins') { await refreshPlugins(); }
+        if (id === 'modalNewGame') { await openNewGame(); return; }
+        if (id === 'modalPlayers') { await refreshPlayers(); }
+        if (id === 'modalRules') { await refreshRules(); }
+        if (id === 'modalSessions') { await refreshSessions(); }
+        if (id === 'modalStudy') { await openStudyRoom(); return; }
+        openModal(id);
+      } catch (e) {
+        reportClientError('打开「' + (b.dataset.modal || '?') + '」失败', e && e.stack);
+        toast('打不开：' + (e && e.message ? e.message : e), 'err');
+      }
     };
   });
   document.querySelectorAll('[data-close]').forEach((b) => {
@@ -1686,6 +2061,20 @@ function bind() {
 
   $('btnScrollBottom').onclick = () => { logEl().scrollTop = logEl().scrollHeight; };
   $('btnClearLog').onclick = () => { logEl().innerHTML = ''; S.events = []; };
+
+  if ($('btnOpenPluginsDir')) {
+    $('btnOpenPluginsDir').onclick = async () => {
+      const r = await call('open_plugins_folder');
+      if (r && r.message) toast(r.message, r.ok ? 'ok' : 'err');
+    };
+  }
+  if ($('btnReloadPlugins')) {
+    $('btnReloadPlugins').onclick = async () => {
+      await refreshPlugins();
+      await refreshState();
+      toast(`扫到 ${PLUGINS.length} 个插件`);
+    };
+  }
 
   // 研读室
   $('studyModuleSel').onchange = renderStudySaved;
