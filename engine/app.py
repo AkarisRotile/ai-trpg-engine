@@ -741,8 +741,10 @@ class App:
             assert self.loop
             self.loop.reset_stop()
             cont = self.loop.step()
-            if not cont:
-                self.loop.finish(self.session.ended_reason or "单步结束")
+            # 手动停不等于结束。只有引擎说该结束了才走散场流程，
+            # 否则一点停止就把模组解禁了。
+            if not cont and not self.loop.stopped:
+                self.loop.finish(self.session.ended_reason or "本局结束")
 
         self._run_async(job, "step")
         return {"ok": True, "message": "推进一轮"}
@@ -762,15 +764,24 @@ class App:
             self.loop.reset_stop()
             self._auto.set()
             self._sys(f"── 自动推进开始（上限 {limit} 轮，随时可停）──")
+            ended = False
             for _ in range(limit):
                 if self.loop.stopped:
                     break
                 if not self.loop.step():
+                    # step() 说该结束了才叫结束。手动停不算。
+                    ended = not self.loop.stopped
                     break
             else:
-                self.session.ended_reason = f"达到本轮自动推进上限 {limit} 轮"
-                self._sys(f"── 已推进 {limit} 轮，自动暂停 ──")
-            self.loop.finish(self.session.ended_reason or "手动停止")
+                # ★ 跑到这一批的上限而已，**这一局没有结束**。
+                #   以前这里直接往下走调 finish()，而 finish() 会标记结束、
+                #   跑跨周目复盘、并且**对全桌解禁模组**。
+                #   于是刚到 5 轮就"结局已过"，玩家被迫对着一个连第一幕都没跑完的
+                #   故事复盘，还得装作看懂了。
+                self._sys(f"── 已推进 {limit} 轮，先停在这里。"
+                          f"这一局还没结束，想接着跑就再点一次自动推进 ──")
+            if ended:
+                self.loop.finish(self.session.ended_reason or "本局结束")
             self._auto.clear()
 
         self._run_async(job, "auto")

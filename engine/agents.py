@@ -21,11 +21,22 @@ from . import chargen, glossary as glossary_mod, memory as memory_mod, prompts
 from . import player_memory
 from . import rules as rules_mod
 from .llm import BaseClient, LLMError, LLMResult, make_client
-from .linter import KP_CHANNELS, PL_CHANNELS, LintReport, lint
+from .linter import (ACT_SOFT_LIMIT, KP_CHANNELS, PL_CHANNELS, LintReport,
+                     clean_output, kp_overreach, lint, narr_too_long, too_long)
 
+_TAG_NAMES = ("think|act|ooc|mem|narr|secret|state|roll|recall|brief|sheet"
+              "|pitch|audit|spine|understanding|expansion|eggs|report|verdict|clock")
+# 一段内容到哪里结束：遇到下一个开标签或闭标签就停。
+# 以前写的是 `(?:</\1>|$)`，要求闭合标签一字不差。模型把 `</ooc>` 写成
+# `</ ooc>` 或者多打一个空格，非贪婪匹配就退化成"一直吃到结尾"，
+# 于是后面所有块都被吞进 ooc，裸标签直接漏到屏幕上。
 TAG_RE = re.compile(
-    r"<(think|act|ooc|mem|narr|secret|state|roll|recall|brief|sheet)>(.*?)(?:</\1>|$)",
+    rf"<[\s]*({_TAG_NAMES})[\s]*>(.*?)"
+    rf"(?=<[\s]*/[\s]*(?:{_TAG_NAMES})[\s]*>|<[\s]*(?:{_TAG_NAMES})[\s]*>|$)",
     re.S | re.I)
+
+# 残留的标签记号。屏幕上出现裸标签是最难看的失败，出口统一擦一遍。
+_STRAY_TAG = re.compile(rf"</?[\s]*(?:{_TAG_NAMES})[\s]*/?>", re.I)
 
 # 通用掷骰工具的调用格式：一行一条，「表达式 | 用途」
 _ROLL_EXPR = re.compile(r"^[0-9dD+\-*\s]{1,40}$")
@@ -127,13 +138,22 @@ class ChannelOutput:
         return "\n".join(x for x in (self.act, self.ooc) if x.strip())
 
 
+def _strip_stray_tags(s: str) -> str:
+    """把通道内容里残留的标签记号擦掉。"""
+    return _STRAY_TAG.sub("", s or "").strip()
+
+
 def split_tags(text: str) -> dict[str, str]:
-    """按标签切通道。容忍缺失的闭合标签（模型偶尔会漏）。"""
+    """按标签切通道。容忍缺失或写歪的闭合标签。"""
     out: dict[str, str] = {}
     consumed: list[tuple[int, int]] = []
     for m in TAG_RE.finditer(text or ""):
         tag = m.group(1).lower()
-        out[tag] = (out.get(tag, "") + "\n" + m.group(2)).strip()
+        body = _strip_stray_tags(m.group(2))
+        if body:
+            out[tag] = (out.get(tag, "") + "\n" + body).strip()
+        else:
+            out.setdefault(tag, "")
         consumed.append((m.start(), m.end()))
     # 把标签外的散字收集起来——它往往是元层泄漏的所在地
     rest = []
@@ -144,7 +164,7 @@ def split_tags(text: str) -> dict[str, str]:
         pos = max(pos, e)
     if pos < len(text):
         rest.append(text[pos:])
-    free = "\n".join(r.strip() for r in rest if r.strip()).strip()
+    free = "\n".join(_strip_stray_tags(r) for r in rest if _strip_stray_tags(r)).strip()
     if free:
         out["free"] = free
     return out
@@ -292,6 +312,24 @@ def parse_kp_output(text: str, *, do_lint: bool = True) -> ChannelOutput:
     return out
 
 
+def _skill_in_purpose(purpose: str, char: dict[str, Any]) -> tuple[str, int] | None:
+    """从一句「用途」里认出是哪个技能检定。
+
+    认得出来就说明这是一次技能检定，该走引擎的成功等级判定，
+    而不是当成一记没头没脑的 1d100。
+    """
+    text = purpose or ""
+    if not text:
+        return None
+    for s in char.get("skills") or []:
+        if not isinstance(s, dict):
+            continue
+        name = str(s.get("name") or "").strip()
+        if len(name) >= 2 and name in text:
+            return name, int(s.get("value") or 0)
+    return None
+
+
 # ══════════════════════════════════════════════════════════════ 座位运行时
 
 def chatter_with_sentinel(agent: Any, msgs: list[dict[str, Any]],
@@ -391,6 +429,11 @@ class BaseAgent:
             max_tokens=self.seat.get("max_tokens", 1400),
             mock_phase=phase,
         )
+        # 机械清洗。破折号、Markdown 加粗、桌边话的句尾句号，这几条没有歧义，
+        # 代码一定修得对，交给模型重写既花钱又不保证。这里是所有模型输出的
+        # 唯一收口点，PL、KP、车卡、研读、审卡全都过这一道。
+        # 机器通道（state/roll/recall）一个字都不碰，那里面是指令和骰点。
+        res.text = clean_output(res.text)
         self.stats.add(res)
         return res
 
@@ -475,8 +518,19 @@ class BaseAgent:
             blocks.append(self.memory.render_recall(details))
 
         vis = self._roll_visibility()
+        char = self.seat.get("character") or {}
         for expr, purpose in rolls:
-            info = self.kernel_do_roll(expr, purpose, vis)
+            # 模型有时候把技能检定写成 <roll>1d100 | 侦查 39</roll>，
+            # 绕过了引擎的判定，于是成功等级只能它自己猜，
+            # 真实反馈里就把「83 对 39」猜成了大失败。
+            # 只要认得出这是哪个技能，就按真检定走，等级由引擎算。
+            skill = _skill_in_purpose(purpose, char)
+            if skill and expr.strip().lower() in ("1d100", "d100", "d100<=", "1d100<=1d100"):
+                res = self.kernel.do_check(
+                    self.display_name, skill[0], skill[1], source="AI 自己发起")
+                info = {"summary": res.text(), **res.to_dict()}
+            else:
+                info = self.kernel_do_roll(expr, purpose, vis)
             if info:
                 out.roll_results.append(info)
                 lines.append(info["summary"])
@@ -861,7 +915,7 @@ class PLAgent(BaseAgent):
     def act(self, *, narr: str, scene_id: str = "", others: list[dict[str, Any]] | None = None,
             dice_lines: list[str] | None = None, engine_notes: list[str] | None = None,
             extra: str = "", unknown: list[str] | None = None,
-            time_block: str = "") -> ChannelOutput:
+            time_block: str = "", phrasing_note: str = "") -> ChannelOutput:
         mem_block = self.memory.render_for_prompt(
             scene_id=scene_id, query=narr,
             topk=int(self.options.get("memory_topk", 10)),
@@ -888,13 +942,17 @@ class PLAgent(BaseAgent):
 
         world = prompts.build_world_message(
             narr=narr, memory_block=mem_block, others=others, dice_lines=dice_lines,
-            unknown=unknown, time_block=time_block,
+            unknown=unknown, time_block=time_block, phrasing_note=phrasing_note,
         )
         self.messages.append({"role": "user", "content": world})
 
         res = self._call(self.messages, phase="play")
         out = parse_pl_output(res.text)
         out.usage = res
+
+        # 动作写太长就是在写小说。玩家是打字跑团，一段动作几十个字就够。
+        if out.lint is not None:
+            out.lint.hits.extend(too_long(out.act, ACT_SOFT_LIMIT))
 
         # 元层哨兵：命中就做一次静默重写。重写仍然失败则保留清洗后的文本。
         max_retry = int(self.options.get("linter_retry", 1))
@@ -1226,7 +1284,7 @@ class KPAgent(BaseAgent):
     def respond(self, *, actions: list[dict[str, Any]], dice_lines: list[str] | None = None,
                 scene_text: str = "", engine_notes: list[str] | None = None,
                 table_talk: list[str] | None = None,
-                time_block: str = "") -> ChannelOutput:
+                time_block: str = "", pc_names: list[str] | None = None) -> ChannelOutput:
         world = prompts.build_kp_world_message(
             actions=actions, dice_lines=dice_lines, scene_text=scene_text,
             engine_notes=engine_notes, table_talk=table_talk, time_block=time_block,
@@ -1244,6 +1302,12 @@ class KPAgent(BaseAgent):
         res = self._call(self.messages, phase="play")
         out = parse_kp_output(res.text)
         out.usage = res
+
+        # 守秘人专用的两条硬拦。模型自己看不出这是越权，
+        # 在它看来「他问了一句」只是顺手的转场，所以只能引擎查。
+        if out.lint is not None:
+            out.lint.hits.extend(kp_overreach(out.narr, pc_names or []))
+            out.lint.hits.extend(narr_too_long(out.narr))
 
         # 语域哨兵：叙述里冒出「不是A而是B」、破折号、Markdown 加粗这类
         # 书面腔，就静默重写一次。守秘人的叙述是玩家整晚盯着的东西，

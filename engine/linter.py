@@ -75,7 +75,46 @@ STYLE_PATTERNS: list[tuple[str, str]] = [
     # 前置声明。想说什么直接说，不用先报一句「我要说什么」。
     (r"(先说好|提前交底|丑话说在前|提醒一句|提醒一下|说句实话|我明说)[，,：:]",
      "前置声明"),
+
+    # 比喻。打字跑团没人为了一个比喻停下来想半天。
+    # 只认书面味很重的这几个，「好像」「感觉像」这种日常说法不碰。
+    (r"仿佛|宛如|好似|恍若|犹如|宛若", "比喻"),
 ]
+
+# 数字后面跟着单位的是正常说事（9月18日、158的身高、3年），不算报账。
+_NUM_TOKEN = re.compile(r"\d+(?!\s*[年月日号钟岁个分秒元块斤米尺页条只人台%])")
+# 区间写法要放过：88——58——90、1925—1930、100--200
+_RANGE_MARK = ("—", "–", "--")
+
+
+def _check_number_pile(body: str, need: int = 3, gap: int = 8) -> str:
+    """三个以上数字挤在一小段里，就是报账单。
+
+    这条本来写成一条正则，结果在「1925—1930」上只匹配到 1925，
+    `{2,}` 根本没生效，误伤了一片。正则塞太多逻辑没法查，
+    改成显式函数，一眼看得出在干什么，也好测。
+    """
+    t = body or ""
+    hits = [m.start() for m in _NUM_TOKEN.finditer(t)]
+    if len(hits) < need:
+        return ""
+    for i in range(len(hits) - need + 1):
+        first, last = hits[i], hits[i + need - 1]
+        if (last - first) > gap * (need - 1) + 6:
+            continue
+        seg = t[first:last]
+        if any(mark in seg for mark in _RANGE_MARK):
+            continue
+        return "数字报账单"
+    return ""
+
+
+# 有些毛病一条正则写不清楚，写成函数更好懂也更好测。
+EXTRA_CHECKS = (_check_number_pile,)
+
+# 动作和叙述的长度上限。超了就是在写小说，不是在跑团。
+ACT_SOFT_LIMIT = 260
+NARR_SOFT_LIMIT = 380
 
 # 助手腔开场白，直接剥离
 STRIP_PREFIX = re.compile(
@@ -90,6 +129,12 @@ _TAG_RE = re.compile(rf"<({_TAGS})>(.*?)</\1>", re.S | re.I)
 
 # 机器通道：里面是指令或骰子结果，不该按人话的标准去挑毛病
 MACHINE_CHANNELS = frozenset({"state", "roll", "recall"})
+
+# 说话的动词。用来抓「守秘人替调查员开口」。
+_SAY_VERB = r"(?:说|问|答|道|喊|笑|开口|嘟囔|嘀咕|接话|应了|回他)"
+
+# 守秘人一轮叙述的长度上限。超了就是在念小说，不是在跑团。
+NARR_SOFT_LIMIT = 380
 
 # 各角色的默认检查通道。
 # PL 不扫 <think>：内心独白本来就允许「他是不是在骗我」这类推理口吻，
@@ -164,15 +209,129 @@ def lint(text: str, channels: tuple[str, ...] = PL_CHANNELS) -> LintReport:
                 snippet = body[max(0, m.start() - 12):m.end() + 12].replace("\n", " ")
                 hits.append(LintHit(reason=reason, snippet=snippet.strip(),
                                     channel=ch, kind="style"))
+        for check in EXTRA_CHECKS:
+            reason = check(body)
+            if reason:
+                hits.append(LintHit(reason=reason, snippet=body[:40].replace("\n", " "),
+                                    channel=ch, kind="style"))
     cleaned = STRIP_PREFIX.sub("", text)
     cleaned = FENCE.sub("", cleaned).strip()
     return LintReport(cleaned=cleaned, hits=hits)
 
 
+# ---------------------------------------------------------------- 机械清洗
+
+# 这几条没有歧义，代码修得比模型稳，所以不重写，直接改。
+_DASH_FIX = re.compile(r"(?<!\d)——(?!\d)|(?<!\d)—(?!\d)|(?<!\d)--(?!\d)")
+_MD_BOLD_FIX = re.compile(r"\*\*([^*\n]{1,60})\*\*")
+# 桌边的话不拿句号收尾。真人打字不带句号。
+_TAIL_PERIOD = re.compile(r"[。\.]+\s*$")
+
+
+def soft_clean(text: str, *, chat: bool = False) -> str:
+    """把能机械修的毛病当场修掉，不指望模型重写。
+
+    为什么要这么做：破折号和 Markdown 加粗没有歧义，代码一定能修对，
+    而让模型重写一次既花钱又不保证修好。用户的原话是「现实说话
+    不可能有人说得出破折号这种东西」，那就别给它露脸的机会。
+
+    `chat=True` 用于桌边的话，额外去掉句尾的句号。
+    """
+    t = text or ""
+    # 破折号前面已经有逗号的时候，别换成两个逗号
+    t = re.sub(r"[，,]\s*(?<!\d)——(?!\d)", "，", t)
+    t = _DASH_FIX.sub("，", t)
+    t = _MD_BOLD_FIX.sub(r"\1", t)
+    t = drop_antithesis(t)
+    t = re.sub(r"。{2,}", "。", t)
+    if chat:
+        # 真人打字不带句号：语料里三万条消息，带句号的只占 0.6%。
+        # 模型拿句号断句的地方，在真人那儿就是另起一条消息。
+        # 所以这里不是删掉，是断开。
+        t = t.replace("。", "\n")
+        t = re.sub(r"\n{2,}", "\n", t)
+        # 收尾括号别被挤到自己一行
+        t = re.sub(r"\n+\s*([）)])", r"\1", t)
+        t = _TAIL_PERIOD.sub("", t.rstrip())
+    return t
+
+
+def clean_output(text: str) -> str:
+    """按通道清洗模型输出。
+
+    只动 think/act/ooc/mem/narr/secret 这些「人话」通道，
+    state/roll/recall 一个字都不碰，里面是指令和骰点，
+    改坏了比不改更糟。
+    """
+    def repl(m: re.Match) -> str:
+        tag = m.group(1)
+        if tag.lower() in MACHINE_CHANNELS:
+            return m.group(0)
+        body = soft_clean(m.group(2), chat=tag.lower() == "ooc")
+        return f"<{tag}>{body}</{tag}>"
+
+    return _TAG_RE.sub(repl, text or "")
+
+
+def kp_overreach(narr: str, pc_names: list[str]) -> list[LintHit]:
+    """守秘人有没有替玩家说话。
+
+    最硬的一个迹象：把引号里的话安在某个调查员头上。
+    这是越权里最严重的一种，玩家没写过的台词一个字都不该有。
+
+    只能靠引擎查：在模型自己看来，「他问了一句」是再自然不过的转场，
+    它不觉得自己在替人做决定。
+    """
+    hits: list[LintHit] = []
+    body = narr or ""
+    for name in pc_names or []:
+        name = (name or "").strip()
+        if len(name) < 2:
+            continue
+        esc = re.escape(name)
+        pat = re.compile(
+            rf"[\u300c\u201c\"][^\u300c\u300d\u201c\u201d\n]{{0,40}}[\u300d\u201d\"]\s*{esc}\s*{_SAY_VERB}"
+            rf"|{esc}\s*{_SAY_VERB}[：:，,]?\s*[\u300c\u201c\"]")
+        for m in pat.finditer(body):
+            snip = body[max(0, m.start() - 12):m.end() + 12].replace("\n", " ")
+            hits.append(LintHit(reason=f"守秘人替{name}说话", snippet=snip.strip(),
+                                channel="narr", kind="overreach"))
+    return hits
+
+
+def too_long(text: str, limit: int, *, channel: str = "act",
+             what: str = "动作", kind: str = "style") -> list[LintHit]:
+    """一段话是不是太长了。超了就是在写小说，不是在跑团。"""
+    body = (text or "").strip()
+    if len(body) <= limit:
+        return []
+    return [LintHit(reason=f"{what}太长（{len(body)} 字，上限 {limit}）",
+                    snippet=body[:40], channel=channel, kind=kind)]
+
+
+def narr_too_long(narr: str, limit: int = NARR_SOFT_LIMIT) -> list[LintHit]:
+    """守秘人的叙述太长了。一轮写几百字，玩家会跳着看，埋的线索全白费。"""
+    return too_long(narr, limit, channel="narr", what="叙述", kind="overreach")
+
+
+def drop_antithesis(text: str) -> str:
+    """把「不是A，而是B」这类句式机械地削成 B。
+
+    这一家子用户点名要杜绝。既然重写一次它还可能再犯，
+    就由代码兜底：留着后半句，把前面那个否定靶子删掉。
+    后半句本身是完整的，删完读起来仍然通顺。
+    """
+    t = text or ""
+    t = re.sub(r"(?:这)?(?:不是|并非)[^，。！？\n]{1,18}[，,]\s*(?:而是|是|这是)\s*", "", t)
+    t = re.sub(r"与其说[^，。！？\n]{1,18}[，,]\s*不如说\s*", "", t)
+    t = re.sub(r"(?:问题)?不在于[^，。！？\n]{1,18}[，,]\s*而在于\s*", "", t)
+    return t
+
+
 def build_repair_instruction(hits: list[LintHit]) -> str:
     """给模型的重写指令。
 
-    只描述目标语域，不重复被禁的概念本身——把「不许写破折号」再说一遍，
+    只描述目标语域，不重复被禁的概念本身。把「不许写破折号」再说一遍，
     等于又把破折号放回它眼前。
     """
     lines = ["刚才那段记录里混进了台面外的话，或者说话的调子不对。", "重写一遍，只保留这些："]
@@ -185,5 +344,10 @@ def build_repair_instruction(hits: list[LintHit]) -> str:
         lines.append("- 想停顿就把句子断掉，转折另起一句。")
         lines.append("- 别解释自己的道理，理由留在心里。")
         lines.append("- 语气自然一点，跟朋友说话那样。")
+    if any(h.kind == "overreach" for h in hits):
+        lines.append("- <narr> 只写世界这一侧发生了什么。")
+        lines.append("- 调查员的动作、对白、念头，他们没写过的就不存在，一个字都不要替他们写。")
+        lines.append("- 别复述他们刚做过的事。")
+        lines.append("- 短。一轮一百到两百字就够，写到三百就该停。")
     lines.append("直接从第一个标签开始。")
     return "\n".join(lines)

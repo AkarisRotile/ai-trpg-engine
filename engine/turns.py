@@ -28,12 +28,20 @@ from . import chargen, memory as memory_mod, module_lib, rules as rules_mod
 from . import clock as clock_mod
 from . import config as cfgmod
 from . import memes as memes_mod
+from . import phrasing as phrasing_mod
 from . import player_memory, spoiler
 from . import study as study_mod
 from .agents import BaseAgent, ChannelOutput, Directive, KPAgent, PLAgent
 from .dice import DiceKernel
 from .llm import LLMError
 from .session import Session
+
+# 判重用的归一化：标点、空白、括号全去掉，只留字
+_NORM_STRIP = re.compile(r"[\s，。！？、；：,.!?;:「」『』“”\"'（）()\[\]【】~～…—\-]+")
+
+
+def _norm_line(s: str) -> str:
+    return _NORM_STRIP.sub("", s or "")
 
 
 def _clip(text: str, limit: int) -> str:
@@ -88,6 +96,13 @@ class GameLoop:
         self._clock_dirty = False
         # 梗探测器：引擎自己数跨人的重复，模型看不见这件事
         self.memes = memes_mod.MemeWatcher()
+        # 句式疲劳：三个人各自都以为自己在正常写，只有引擎看得见他们撞了
+        self.phrasing = phrasing_mod.OpenerWatcher()
+        self._phrasing_note = ""
+        # 这一轮是不是剧情关键节点。由守秘人用 <state> key yes/no 告诉引擎。
+        self._key_beat = False
+        # 谁出场这件事不该走骰子内核（那是给桌面上掷的，会记进骰子日志）。
+        self._part_rng = random.SystemRandom()
         # 桌边插话轮里"这次轮到谁接话"的游标（免得每次都点同一个人）
         self._tt_cursor = 0
         if session.clock is None:
@@ -991,6 +1006,9 @@ class GameLoop:
                     actions=self._round_publics, dice_lines=dice_lines,
                     scene_text=scene_text, engine_notes=notes, table_talk=table_talk,
                     time_block=time_block,
+                    # 调查员的名字。守秘人替他们开口是越权里最严重的一种，
+                    # 引擎拿得到这些名字，所以查得动。
+                    pc_names=[pl.display_name for pl in self.pls],
                 )
             except LLMError as e:
                 self._e("system", f"守秘人回合失败：{e.message}")
@@ -1049,10 +1067,64 @@ class GameLoop:
 
     # ══════════════════════════════════════════════ PL 阶段
 
+    # 桌边话量档位，换算成"这一轮他出手"的概率。
+    # 1 到 5 只调出场的多少，不放松任何一条说话规矩。
+    ENERGY_CHANCE = {1: 0.25, 2: 0.40, 3: 0.55, 4: 0.75, 5: 0.90}
+
+    def _pl_participants(self, narr: str) -> list["PLAgent"]:
+        """这一轮谁动。
+
+        真实桌上不是每个人每轮都有动作。压得太满，满桌都在说话，
+        反而没有一个人是安静的，不像人。所以：
+
+          · 守秘人标了这一轮是关键节点 → 全员参与
+          · 有人点了这个人的名字（叙述里或别人嘴里）→ 他必动
+          · 其余按桌边话量的档位掷一次
+
+        判断"是否关键节点"是模型的事，"要不要按概率抽"是脚本的事，
+        这条分工和骰子、时间、车卡预算一样。
+        """
+        if self.options.get("pl_participation", "chance") != "chance":
+            # 有人在设置里选了"每轮全员"，或者这是自动化测试
+            return list(self.pls)
+        if self._key_beat or len(self.pls) <= 1:
+            return list(self.pls)
+
+        spoken = " ".join(
+            (o.get("ooc") or "") + (o.get("act") or "") for o in self._round_publics)
+        haystack = f"{narr or ''}\n{spoken}"
+
+        out: list["PLAgent"] = []
+        for pl in self.pls:
+            prof = pl.seat.get("profile") or {}
+            handles = {str(pl.display_name or ""), str(prof.get("player_name") or "")}
+            if any(h and len(h) >= 2 and h in haystack for h in handles):
+                out.append(pl)
+                continue
+            try:
+                lv = max(1, min(5, int(prof.get("table_energy") or 3)))
+            except (TypeError, ValueError):
+                lv = 3
+            if self._part_rng.random() < self.ENERGY_CHANCE[lv]:
+                out.append(pl)
+        return out
+
     def _pl_phase(self, time_block: str = "") -> tuple[dict[str, ChannelOutput], list[str]] | None:
         """全体 PL 行动。探索轮互不可见当轮他人输出。"""
         narr = self.last_narr
         scene_id = self.session.scene_id
+
+        # ★ 这一轮谁出场。以前是每个人都调一次，于是满桌都在说话，
+        #   一轮下来没有人是安静的，反而不像真的。
+        actors = self._pl_participants(narr)
+        # 一次只管一轮。守秘人不重新标，下一轮就回到按概率抽。
+        self._key_beat = False
+        quiet = [pl for pl in self.pls if pl not in actors]
+        if quiet:
+            self._e("system", "（这一轮 " + "、".join(
+                (pl.seat.get("profile") or {}).get("player_name") or pl.display_name
+                for pl in quiet) + " 只是听着）")
+
         # 上一轮的**明骰**：全桌都看见了，这一轮发给每个人（包括掷的人自己）
         public_prev = list(self._public_dice)
         self._public_dice = []
@@ -1071,6 +1143,7 @@ class GameLoop:
                     extra=extra,
                     unknown=self._unknown_for(pl),
                     time_block=time_block,
+                    phrasing_note=self._phrasing_note,
                 )
                 return pl.seat_id, out, ""
             except LLMError as e:
@@ -1078,15 +1151,15 @@ class GameLoop:
 
         outputs: dict[str, ChannelOutput] = {}
         errors: dict[str, str] = {}
-        if self.options.get("parallel_pl", True) and len(self.pls) > 1:
-            with ThreadPoolExecutor(max_workers=min(6, len(self.pls))) as pool:
-                for sid, out, err in pool.map(run_one, self.pls):
+        if self.options.get("parallel_pl", True) and len(actors) > 1:
+            with ThreadPoolExecutor(max_workers=min(6, len(actors))) as pool:
+                for sid, out, err in pool.map(run_one, actors):
                     if out is not None:
                         outputs[sid] = out
                     else:
                         errors[sid] = err
         else:
-            for pl in self.pls:
+            for pl in actors:
                 sid, out, err = run_one(pl)
                 if out is not None:
                     outputs[sid] = out
@@ -1229,13 +1302,17 @@ class GameLoop:
             # 以前这里只在"被点名"时才说话，于是大家各说各的、一轮下来零来回——
             # 那正是"桌边感"最要紧的那部分。现在按顺序轮着补一两个人上来接话。
             if not targets:
-                quiet = [pl for pl in self.pls
-                         if pl.seat_id in by_seat and pl.seat_id not in named]
+                # 沉默的人也可以被搭话。以前这里只在"这一轮动过"的人里挑，
+                # 于是整轮听着的人永远等不到别人跟他说话。
+                quiet = [pl for pl in self.pls if pl.seat_id not in named]
                 if not quiet:
                     return
-                want = 2 if exchange == 0 else 1
-                want = max(1, min(int(self.options.get("table_talk_fallback", want)), want,
-                                  len(quiet)))
+                # ★ 只补一个人。
+                #   以前第一轮固定补两个，于是每一轮都像点名，人人都得开口，
+                #   一轮下来满桌都在说话，反而不像真的。
+                #   真人桌上常有人整轮听着，也常出现守秘人只跟某一个玩家一来一回。
+                want = max(1, min(int(self.options.get("table_talk_fallback", 1)),
+                                  2, len(quiet)))
                 start = self._tt_cursor % len(quiet)
                 for k in range(want):
                     targets.append((quiet[(start + k) % len(quiet)], ""))
@@ -1256,7 +1333,26 @@ class GameLoop:
             if not replies:
                 return
 
+            # ★ 去复读。桌边插话是"先全部生成、再一起发出"的，
+            #   所以第二个人的提示里已经包含第一个人的原话，它经常直接照抄。
+            #   照抄不是接话，丢掉。不丢的话，梗探测器还会把这个 bug 当成梗收下来，
+            #   然后告诉全桌"成梗了"，等于给故障发奖。
+            seen: dict[str, str] = {}
+            for o in self._round_publics:
+                for line in (o.get("ooc") or "").splitlines():
+                    k = _norm_line(line)
+                    if k:
+                        seen.setdefault(k, str(o.get("seat_id") or ""))
+
+            dropped = 0
             for pl, reply in replies:
+                k = _norm_line(reply)
+                owner = seen.get(k) if k else None
+                if k and owner and owner != pl.seat_id:
+                    dropped += 1
+                    continue
+                if k:
+                    seen[k] = pl.seat_id
                 self._e("ooc", reply, seat_id=pl.seat_id,
                         name=(pl.seat.get("profile") or {}).get("player_name", ""),
                         meta={"table_talk": True})
@@ -1265,8 +1361,23 @@ class GameLoop:
                 if entry is not None:
                     entry["ooc"] = (entry.get("ooc", "") + "\n" + reply).strip()
                     entry["tt"] = True
+            if dropped:
+                self._e("system", f"（这一轮有 {dropped} 句是照抄别人的，没有出声）")
 
         self._watch_memes()
+        self._watch_phrasing()
+
+    def _watch_phrasing(self) -> None:
+        """看看这一桌的动作句开头有没有撞车。
+
+        三个人各自都以为自己在正常写，只有引擎看得见他们撞了。
+        结果当作**事实**放进下一轮的世界消息里，不下指令。
+        """
+        for o in self._round_publics:
+            who = (o.get("player_name") or o.get("display_name")
+                   or o.get("seat_id") or "")
+            self.phrasing.observe(who, o.get("act") or "", self.session.round)
+        self._phrasing_note = self.phrasing.note()
 
     # ══════════════════════════════════════════════ 梗
 
@@ -1340,6 +1451,15 @@ class GameLoop:
 
         if kind == "note":
             self._e("system", f"守秘人备注：{d.arg(1)}")
+            return []
+
+        if kind in ("key", "beat", "节点", "keybeat"):
+            # 守秘人告诉引擎：这一轮是不是剧情关键节点。
+            # 关键节点全员参与，平常按桌边话量的档位抽。
+            word = (target or payload or "").strip().lower()
+            self._key_beat = word in ("yes", "y", "1", "true", "on", "是", "关键")
+            if self._key_beat:
+                self._e("system", "〔守秘人标了这一轮是关键节点，全员参与〕")
             return []
 
         # ---- 拨钟：故事里时间往前走（等了两小时、开车过去、一直熬到天亮）----

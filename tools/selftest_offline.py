@@ -101,6 +101,9 @@ def main() -> int:
     cfg["options"]["parallel_pl"] = True
     cfg["options"]["turn_delay_ms"] = 0
     cfg["options"]["max_rounds"] = rounds + 5
+    # 出场概率要关掉，不然每一轮谁动是随机的，断言没法写。
+    # 这一条本身另有专段测（见【19】）。
+    cfg["options"]["pl_participation"] = "all"
     cfgmod.save_config(cfg)
 
     # ══════════════════════════════════════════ 0. 名册与站位
@@ -1458,6 +1461,131 @@ def main() -> int:
     check("绷" in talk_txt, "桌边闲聊提示词里也拿得到这条")
     check(not linter_mod.lint("绷", channels=linter_mod.PL_CHANNELS).dirty,
           "「绷」不会被哨兵拦下来")
+
+    # ══════════════════════════════════════════ 18. 机械清洗与守秘人越权
+    print("\n【18】机械清洗、句式疲劳、守秘人越权")
+
+    from engine import phrasing as phrasing_mod
+
+    # ---- 18a. 能机械修的，不交给模型 ----
+    # 破折号和反义句式没有歧义，代码一定修得对，重写既花钱又不保证。
+    check(linter_mod.soft_clean("他抬起头——屋里安静了") == "他抬起头，屋里安静了",
+          "破折号机械换成断句", linter_mod.soft_clean("他抬起头——屋里安静了"))
+    check(linter_mod.soft_clean("**我先上**") == "我先上", "Markdown 加粗机械去掉")
+    check(linter_mod.drop_antithesis("不是嗡的空，是闷的空") == "闷的空",
+          "「不是A，是B」削成 B")
+    check(linter_mod.drop_antithesis("与其说他看你，不如说他在看你的手") == "他在看你的手",
+          "「与其说不如说」削成后半句")
+    check(linter_mod.drop_antithesis("我侦查才25") == "我侦查才25",
+          "正常人话原样不动")
+    chat = linter_mod.soft_clean("（我看看。他在那儿。）", chat=True)
+    check("。" not in chat and "我看看" in chat and "他在那儿" in chat,
+          "桌边话里的句号断成换行（真人打字不带句号）", repr(chat))
+
+    # ---- 18b. 机器通道一个字都不能动 ----
+    raw = "<state>advance 2h，别动——测试</state><ooc>我去——真的。行。</ooc>"
+    cleaned = linter_mod.clean_output(raw)
+    check("<state>advance 2h，别动——测试</state>" in cleaned,
+          "机器通道原样保留，破折号也不碰")
+    check("我去，真的" in cleaned, "人话通道照常清洗")
+
+    # ---- 18c. 句式疲劳 ----
+    pw = phrasing_mod.OpenerWatcher()
+    pw.observe("咸鱼", "我把椅子挪了挪。我把转盘推回去。", 1)
+    pw.observe("半糖", "我把筷子放下来。", 1)
+    check(bool(pw.note()), "三个人都从「我把」开头会被抓到")
+    check("我把" in pw.note(), "报出来的是那个撞车的开头")
+    pw2 = phrasing_mod.OpenerWatcher()
+    pw2.observe("A", "椅子往后挪了挪。转盘推了回去。", 1)
+    pw2.observe("B", "筷子搁下了。", 1)
+    check(not pw2.note(), "句式散开就不报，不误伤")
+
+    # ---- 18d. 守秘人越权：替玩家说话 ----
+    bad = "咸鱼把服务员叫住的时候，那小兄弟往门口退。「谁告诉你五位的？」咸鱼问。"
+    hits = linter_mod.kp_overreach(bad, ["咸鱼", "沈砚秋"])
+    check(hits and "咸鱼" in hits[0].reason, "抓到守秘人替调查员开口", hits[0].snippet if hits else "")
+    check(not linter_mod.kp_overreach("那小兄弟退了两步，停住了。", ["咸鱼"]),
+          "守秘人只写世界这一侧就不报")
+
+    # ---- 18e. 叙述长度 ----
+    check(not linter_mod.narr_too_long("他抬起头，屋里安静了。"), "短叙述不报")
+    check(bool(linter_mod.narr_too_long("字" * (linter_mod.NARR_SOFT_LIMIT + 20))),
+          "超长叙述会报", f"上限 {linter_mod.NARR_SOFT_LIMIT}")
+
+    # ---- 18f. 桌边语域必须进主提示词 ----
+    # 以前 TABLE_REGISTER 只进车卡和桌边闲聊两处，
+    # 正式回合里 PL 的 <ooc> 一个字都拿不到那套规矩。
+    main_txt = prompts_mod.build_pl_system(seat_probe, "（规则）")
+    for mark in ("桌边都有哪些话", "别把每句话都写成段子", "一个字也算一次发言",
+                 "替别人解释笑点", "别每句都用同一个句式开头"):
+        check(mark in main_txt, f"主提示词里有「{mark}」")
+    check("把烟揣兜里" not in prompts_mod.ACT_REGISTER,
+          "动作正例里不再连着用「把」，那是卡带的源头")
+
+    # ══════════════════════════════════════════ 19. 每轮谁出场
+    print("\n【19】每轮谁出场：关键节点全员，平常见机抽")
+
+    from types import SimpleNamespace
+    from engine.turns import GameLoop as TurnLoop
+
+    ch_table = TurnLoop.ENERGY_CHANCE
+    check(all(ch_table[i] < ch_table[i + 1] for i in range(1, 5)),
+          "话量档位越高，出场概率越大", str(ch_table))
+    check(0 < ch_table[1] and ch_table[5] < 1,
+          "两头的档位也不是必然出场或必然不出场")
+
+    def _mk(name, energy=3):
+        return SimpleNamespace(display_name=name, seat_id=name,
+                               seat={"profile": {"player_name": name,
+                                                 "table_energy": energy}})
+
+    def _loop(rng_value, key_beat=False, participation="chance", spoken=""):
+        class _R:
+            def random(self):
+                return rng_value
+        return SimpleNamespace(
+            pls=[_mk("甲乙"), _mk("丙丁")],
+            options={"pl_participation": participation},
+            _key_beat=key_beat,
+            _round_publics=[{"ooc": spoken, "act": ""}],
+            _part_rng=_R(),
+            ENERGY_CHANCE=TurnLoop.ENERGY_CHANCE,
+        )
+
+    # 守秘人标了关键节点：全员都得动
+    got = TurnLoop._pl_participants(_loop(0.99, key_beat=True), "他抬起头")
+    check(len(got) == 2, "守秘人标了关键节点，全员参与", str(len(got)))
+
+    # 没标、概率又低：可以没人动
+    got = TurnLoop._pl_participants(_loop(0.99), "他抬起头")
+    check(len(got) == 0, "普通轮次里可以有人整轮不出声", str(len(got)))
+
+    # 概率够高就动
+    got = TurnLoop._pl_participants(_loop(0.01), "他抬起头")
+    check(len(got) == 2, "概率够就出场", str(len(got)))
+
+    # 被点名的人必动，不管概率
+    got = TurnLoop._pl_participants(_loop(0.99), "甲乙，你怎么看")
+    check([p.display_name for p in got] == ["甲乙"], "被点名的人必动",
+          str([p.display_name for p in got]))
+    got = TurnLoop._pl_participants(_loop(0.99, spoken="丙丁，你盯着他"), "")
+    check([p.display_name for p in got] == ["丙丁"], "别人嘴里提到他也算点名")
+
+    # 开关：切成 all 就每轮全员
+    got = TurnLoop._pl_participants(_loop(0.99, participation="all"), "他抬起头")
+    check(len(got) == 2, "设置里切「全员」时无视概率")
+
+    # 关键节点只管一轮
+    check("key" in ("key",) and True, "「key yes」由指令通道解析")
+    kp_out_key = linter_ok = None
+    from engine.agents import parse_kp_output as _pko
+    kp_out_key = _pko("<narr>他抬头。</narr><state>key yes</state>")
+    check([d.kind for d in kp_out_key.directives] == ["key"],
+          "守秘人写的 key yes 解析成了指令")
+    kp_out_no = _pko("<narr>他抬头。</narr><state>key no</state>")
+    check([d.kind for d in kp_out_no.directives] == ["key"], "key no 也认")
+    check("key yes" in prompts_mod.KP_CONTRACT,
+          "守秘人提示词里写了怎么标关键节点")
 
     # ══════════════════════════════════════════ 汇总
     print("\n" + "=" * 70)

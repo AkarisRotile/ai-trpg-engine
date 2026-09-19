@@ -271,6 +271,9 @@ def default_config() -> dict[str, Any]:
             "rules_detail": "lean",    # lean | standard | full —— 规则注入详细度
             "linter_retry": 1,         # 元层命中后的静默重写次数
             "parallel_pl": True,       # 多名 PL 并行生成（更快，但瞬时并发高）
+            # 每轮谁出场：chance = 按桌边话量抽（默认，像真人桌）；
+            # all = 每轮全员都动（调试或就想看满桌的时候用）
+            "pl_participation": "chance",
             "table_talk": True,        # 回合之间插一轮桌边点名对话
             "table_talk_exchanges": 2, # 桌边来回几次（0 = 关闭，最省）
             "chargen_chat_rounds": 2,  # 车卡时先在桌上聊几轮再定妆（0 = 直接出卡）
