@@ -21,6 +21,18 @@ data/defined_names.txt
 data/modules/*
 !data/modules/demo_洋馆之夜/
 
+# ── 插件 ──
+# 两个内置插件跟着仓库走；用户自己装的插件一律不跟踪。
+# 同一件事可以有好几个插件做，里面有别人的东西。
+data/plugins/*
+!data/plugins/thinking-viewer/
+!data/plugins/battle-grid/
+# 插件的启停状态是本地的东西，不进库
+data/plugins.json
+
+# ── 用户自己放的立绘和头像 ──
+data/portraits/
+
 # ── 打包产物 ──
 build/
 dist/
